@@ -49,7 +49,10 @@ def build_who_body(
         if client.get("client_type") != "0":
             continue
         clid = client["clid"]
-        info = clientinfo(clid)
+        try:
+            info = clientinfo(clid)
+        except Exception:
+            continue
         nick = info.get("client_nickname", "?")
         started = join_times.get(clid)
         if started is not None:
