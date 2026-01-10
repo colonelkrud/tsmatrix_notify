@@ -1,0 +1,20 @@
+[MESSAGES CONTROL]
+# Enable only the messages you care about:
+enable=unbound-variable
+
+[MESSAGES CONTROL]
+enable=unreachable
+
+[DESIGN]
+# Maximum allowed distinct code paths in a function
+max-branches=12
+# Maximum number of `if`/`elif`/`else` blocks
+max-nested-blocks=5
+
+[REPORTS]
+confidence=
+    HIGH,
+    CONTROL_FLOW,
+    INFERENCE,
+    INFERENCE_FAILURE,
+    UNDEFINED

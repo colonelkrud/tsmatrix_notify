@@ -1,0 +1,3 @@
+python-dotenv
+ts3API
+simplematrixbotlib

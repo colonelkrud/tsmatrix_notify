@@ -1,0 +1,79 @@
+# =========================
+# Secrets / local config
+# =========================
+.env
+*.env
+
+# =========================
+# Virtual environments
+# =========================
+.venv/
+venv/
+ENV/
+env/
+
+# =========================
+# Python caches / build
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+.cache/
+
+# =========================
+# IDE / editor files
+# =========================
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# =========================
+# OS junk
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+watchdog.ps1
+
+# =========================
+# Logs / runtime output
+# =========================
+*.log
+api.log
+
+# =========================
+# App runtime/state (Matrix session, stats, local store)
+# Adjust if you WANT these versioned
+# =========================
+store/
+session.txt
+matrix_session.json
+bot_reviews_stats.json
+bot_reviews_stats*.json
+
+# If you ever create dbs locally
+*.db
+*.sqlite
+*.sqlite3
+
+# =========================
+# Temp files
+# =========================
+*.tmp
+*.swp
+*~
