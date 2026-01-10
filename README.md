@@ -102,30 +102,41 @@ pip install -r requirements.txt
 
 ### 4. Configure environment variables
 
-Create a `.env` file:
+Copy the example and edit it:
 
-```env
-# TeamSpeak
-TS3_HOST=127.0.0.1
-TS3_PORT=10011
-TS3_USER=serveradmin
-TS3_PASSWORD=your_password
-TS3_VSERVER_ID=1
-
-# Matrix
-MATRIX_HOMESERVER=https://matrix.example.com
-MATRIX_USER_ID=@bot:example.com
-MATRIX_ACCESS_TOKEN=your_access_token
-MATRIX_ROOM_ID=!roomid:example.com
-
-# Optional
-BOT_MESSAGES_FILE=bot_messages.json
-WATCHDOG_TIMEOUT=1800
+```bash
+cp .env.example .env
 ```
+
+Then set all required values in `.env`.
 
 ### 5. Start the bot
 
 ```bash
+python tsmatrix_notify.py
+```
+
+---
+
+## Quick start (Windows PowerShell)
+
+```powershell
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+# edit .env in your editor, then:
+python tsmatrix_notify.py
+```
+
+## Quick start (Linux/macOS)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+# edit .env in your editor, then:
 python tsmatrix_notify.py
 ```
 
@@ -148,16 +159,46 @@ python tsmatrix_notify.py --debug --watchdog
 
 ---
 
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+Tests use fakes and do not contact real TeamSpeak or Matrix servers.
+
+---
+
 ## Files Overview
 
 | File                      | Purpose                              |
 | ------------------------- | ------------------------------------ |
 | `tsmatrix_notify.py`      | Main application                     |
+| `tsmatrix_notify/`        | Hexagonal architecture package       |
 | `requirements.txt`        | Python dependencies                  |
+| `requirements-dev.txt`    | Test dependencies (optional)         |
+| `pyproject.toml`          | Tooling configuration                |
+| `.env.example`            | Sample environment file              |
+| `tsmatrix_config.py`      | Configuration loading + validation   |
+| `message_catalog.py`      | Praise/apology catalog loader        |
+| `stats_store.py`          | Review stats persistence             |
 | `.env`                    | Local secrets/config (not committed) |
 | `bot_messages.json`       | Praise/apology messages              |
 | `bot_reviews_stats.json`  | Feedback counters                    |
 | `tsmatrix_notify_run.bat` | Windows launcher                     |
+| `tests/`                  | Basic unit tests                     |
+
+---
+
+## Architecture Overview (Ports & Adapters)
+
+The project is organized using a hexagonal architecture:
+
+* **Domain** (`tsmatrix_notify/domain/`): pure logic (state, message formatting, event handling).
+* **Ports** (`tsmatrix_notify/ports/`): typed interfaces for TeamSpeak, Matrix, and persistence.
+* **Adapters** (`tsmatrix_notify/adapters/`): concrete implementations (ts3API, simplematrixbotlib, filesystem).
+* **Main** (`tsmatrix_notify/main.py`): wiring, event loop, and runtime coordination.
 
 ---
 
@@ -200,3 +241,35 @@ python tsmatrix_notify.py --debug --watchdog
 
 ## License
 * GPLv3
+
+---
+
+## Troubleshooting
+
+### Windows: Git "unable to create temporary file"
+
+If you see errors like `unable to create temporary file`, check the following:
+
+* **Long paths**: enable long paths in Windows Group Policy or registry.
+* **Antivirus/Defender**: exclude the repo folder to prevent locks on `.git\` temp files.
+* **Permissions**: run your shell as the same user that owns the repo.
+* **Disk issues**: ensure the drive has free space and isn't set to read-only.
+
+### Matrix or TS3 connection loops
+
+* Verify required `.env` values are present and valid.
+* Use `--debug` to see retry/backoff logs.
+
+---
+
+## Commands
+
+| Command | Description |
+| --- | --- |
+| `!ping`, `!p` | latency check |
+| `!ts3health`, `!th` | TS3 connectivity + version |
+| `!ts3online`, `!who`, `!list` | list online TS3 users |
+| `!goodbot`, `!badbot` | feedback with stats |
+| `!restart`, `!rs` | restart the bot |
+| `!debug`, `!d` | run all diagnostics |
+| `!help`, `!h`, `!man` | show help |
