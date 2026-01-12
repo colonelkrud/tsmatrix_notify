@@ -215,7 +215,7 @@ The project is organized using a hexagonal architecture:
 
 * The bot runs inside its **own asyncio loop**
 * All reconnects and restarts are automatic
-* Matrix outages are handled silently with backoff
+* Matrix outages are handled silently with backoff (configuration errors fail fast)
 * TS3 socket drops are detected within ~12 seconds
 * Presence reconciliation runs every 10 seconds
 
@@ -257,7 +257,7 @@ If you see errors like `unable to create temporary file`, check the following:
 
 ### Matrix or TS3 connection loops
 
-* Verify required `.env` values are present and valid.
+* Verify required `.env` values are present and valid (invalid Matrix homeserver URLs now stop the bot with a clear error).
 * Use `--debug` to see retry/backoff logs.
 
 ---
