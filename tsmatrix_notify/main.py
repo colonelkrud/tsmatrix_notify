@@ -7,6 +7,7 @@ import logging
 import random
 import sys
 import time
+from urllib.parse import urlparse
 
 import aiohttp
 from dotenv import load_dotenv
@@ -84,6 +85,7 @@ async def probe_homeserver(hs: str, log: logging.Logger, timeout_s: int = 6) -> 
     if not hs:
         log.error("Matrix homeserver not configured")
         return False
+    log.debug("versions probe using homeserver=%r", hs)
     url = hs.rstrip("/") + "/_matrix/client/versions"
     try:
         async with aiohttp.ClientSession() as session:
@@ -124,28 +126,44 @@ def is_transient_matrix_error(exc: Exception) -> bool:
     transient_types = (asyncio.TimeoutError, TimeoutError, ClientConnectorError, ConnectionError)
     if isinstance(exc, transient_types):
         return True
-    if isinstance(exc, ValueError) and "Invalid Homeserver" in str(exc):
-        return True
     if isinstance(exc, Exception) and "M_UNKNOWN" in str(exc):
         return True
     return False
 
 
+def validate_and_normalize_homeserver(hs: str, log: logging.Logger) -> str:
+    raw = "" if hs is None else str(hs)
+    log.debug("Validating Matrix homeserver: %r", raw)
+    candidate = raw.strip()
+    parsed = urlparse(candidate)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or not parsed.netloc:
+        log.error("Invalid Matrix homeserver: %r", raw)
+        raise ConfigError(f"Invalid Matrix homeserver: {raw!r}")
+    normalized = candidate.rstrip("/")
+    if normalized != candidate:
+        log.debug("Normalized Matrix homeserver: %r -> %r", candidate, normalized)
+    return normalized
+
+
+def build_matrix_creds(matrix_config, log: logging.Logger, normalized_homeserver: str | None = None):
+    normalized_hs = normalized_homeserver or validate_and_normalize_homeserver(
+        matrix_config.homeserver, log
+    )
+    creds = botlib.Creds(
+        homeserver=normalized_hs,
+        username=matrix_config.user_id,
+        access_token=matrix_config.access_token,
+        session_stored_file=matrix_config.session_file,
+    )
+    return normalized_hs, creds
+
+
 def connect_matrix(creds, log):
-    while True:
-        try:
-            if not creds.homeserver or not str(creds.homeserver).strip().lower().startswith(("http://", "https://")):
-                raise ValueError("Invalid Homeserver")
-            log.debug("Initializing Matrix bot for %s", creds.username)
-            bot = botlib.Bot(creds)
-            log.info("Matrix bot created for %s", creds.username)
-            return bot
-        except ValueError as exc:
-            log.error("Matrix init failed: %s", exc)
-            time.sleep(5)
-        except Exception as exc:
-            log.error("Matrix init failed: %s", exc)
-            time.sleep(5)
+    log.debug("Initializing Matrix bot for %s (homeserver=%r)", creds.username, creds.homeserver)
+    bot = botlib.Bot(creds)
+    log.info("Matrix bot created for %s", creds.username)
+    return bot
 
 
 def run() -> int:
@@ -156,6 +174,7 @@ def run() -> int:
 
     try:
         config = load_config(log)
+        normalized_homeserver = validate_and_normalize_homeserver(config.matrix.homeserver, log)
     except ConfigError as exc:
         log.error("Configuration error: %s", exc)
         return 2
@@ -178,14 +197,11 @@ def run() -> int:
         ts3 = None
 
         try:
-            if config.matrix.homeserver:
-                main_loop.run_until_complete(await_homeserver_ready(config.matrix.homeserver, log))
+            if normalized_homeserver:
+                main_loop.run_until_complete(await_homeserver_ready(normalized_homeserver, log))
 
-            creds = botlib.Creds(
-                homeserver=config.matrix.homeserver,
-                username=config.matrix.user_id,
-                access_token=config.matrix.access_token,
-                session_stored_file=config.matrix.session_file,
+            _, creds = build_matrix_creds(
+                config.matrix, log, normalized_homeserver=normalized_homeserver
             )
             room_id = config.matrix.room_id
 
@@ -227,8 +243,8 @@ def run() -> int:
                 except Exception as exc:
                     log.warning("%s whoami: %r", tag, exc)
 
-            if config.matrix.homeserver:
-                main_loop.create_task(_matrix_http_versions(config.matrix.homeserver))
+            if normalized_homeserver:
+                main_loop.create_task(_matrix_http_versions(normalized_homeserver))
             main_loop.create_task(_matrix_whoami("post-connect"))
 
             def ts3_event_handler(event: TSEvent):
@@ -424,7 +440,7 @@ def run() -> int:
                         f"- TS3 target:                {ts3_target}\n"
                         f"- TS3 instance uptime:       {inst_uptime}\n"
                         f"- TS3 virtualserver uptime:  {vs_uptime}\n"
-                        f"- Matrix homeserver:         {config.matrix.homeserver}\n"
+                        f"- Matrix homeserver:         {normalized_homeserver}\n"
                         f"- Matrix user_id (whoami):   {mx_user_id}\n"
                         f"- Matrix room:               {room_id}\n"
                     )
@@ -502,6 +518,13 @@ def run() -> int:
                 log.info("Matrix main returned; restarting bridge.")
             main_loop.run_until_complete(shutdown_bot(bot, log))
 
+        except ConfigError as exc:
+            log.error("Configuration error: %s", exc)
+            try:
+                main_loop.run_until_complete(shutdown_bot(bot, log))
+            except Exception:
+                pass
+            return 2
         except Exception as exc:
             et = type(exc).__name__
             if is_transient_matrix_error(exc) or et in {"RestartBot"}:
