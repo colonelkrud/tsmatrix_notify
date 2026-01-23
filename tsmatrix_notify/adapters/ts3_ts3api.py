@@ -116,6 +116,9 @@ class TS3Safe:
         except Exception:
             self._log.exception("TS3 post-connect/notify-binder hook failed")
 
+    def reconnect(self) -> None:
+        self._reconnect()
+
     def call(self, fn, *args, **kwargs):
         try:
             return fn(self._conn, *args, **kwargs)
@@ -232,3 +235,6 @@ class TS3APIAdapter(TS3Port):
             self._safe.conn.quit()
         except Exception:
             self._log.exception("Error stopping TS3 connection")
+
+    def reconnect(self) -> None:
+        self._safe.reconnect()

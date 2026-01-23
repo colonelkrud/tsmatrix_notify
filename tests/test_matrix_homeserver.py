@@ -5,11 +5,8 @@ import pytest
 from aiohttp.client_exceptions import ClientConnectorError
 
 from tsmatrix_notify.config import ConfigError
-from tsmatrix_notify.main import (
-    build_matrix_creds,
-    is_transient_matrix_error,
-    validate_and_normalize_homeserver,
-)
+from tsmatrix_notify.main import build_matrix_creds, validate_and_normalize_homeserver
+from tsmatrix_notify.application.supervisors import is_transient_matrix_error
 
 
 @pytest.mark.parametrize(
