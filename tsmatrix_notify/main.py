@@ -480,9 +480,15 @@ def run() -> int:
 
             async def _ts3_restart_watch():
                 try:
+                    log.info("TS3 restart supervisor started")
                     while True:
-                        await asyncio.to_thread(ts3_restart_event.wait)
-                        await asyncio.to_thread(ts3_supervisor.reconnect_with_backoff)
+                        if ts3_restart_event.is_set():
+                            log.warning("TS3 restart signal observed; attempting reconnect")
+                            try:
+                                await asyncio.to_thread(ts3_supervisor.reconnect_with_backoff)
+                            except Exception:
+                                log.exception("TS3 reconnect supervisor loop failed")
+                        await asyncio.sleep(1)
                 except asyncio.CancelledError:
                     log.debug("_ts3_restart_watch cancelled")
                     raise
