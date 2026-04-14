@@ -1,275 +1,113 @@
 # TSMatrixNotify
 
-**TeamSpeak ↔ Matrix Notification Bridge**
+TeamSpeak 3 ➜ Matrix notification bridge. It subscribes to TeamSpeak events and posts join/leave/move/kick/ban updates into a Matrix room, plus Matrix bot commands for diagnostics.
 
-TSMatrixNotify is a Python-based bridge that connects a TeamSpeak 3 server to a Matrix room.
-It relays real-time TS3 events (joins, leaves, moves, kicks, bans) to Matrix and provides Matrix-side bot commands for monitoring and control.
-
-
----
-
-## Features
-
-### TeamSpeak Integration
-
-* Connects via ServerQuery
-* Subscribes to server + channel events
-* Tracks connected users and session durations
-* Announces:
-
-  * Joins / leaves
-  * Channel moves
-  * Kicks / bans
-
-### Matrix Bot
-
-* Uses `simplematrixbotlib` + `matrix-nio`
-* Sends TS3 event notifications to a room
-* Supports commands:
-
-  * `!ping` / `!p` – latency check
-  * `!ts3health` / `!th` – TS3 connectivity + version
-  * `!ts3online` / `!who` / `!list` – list online TS3 users
-  * `!goodbot` / `!badbot` – feedback with stats
-  * `!restart` / `!rs` – restart the bot
-  * `!debug` / `!d` – run all diagnostics
-  * `!help` / `!h` – show help
-
-### Reliability & Recovery
-
-* Automatic TS3 reconnect on socket failure
-* Matrix homeserver preflight probe (`/_matrix/client/versions`)
-* Exponential backoff with jitter
-* Sync-response watchdog (detects stalled Matrix connections)
-* Optional time-based watchdog (`--watchdog`)
-* Graceful shutdown with session cleanup
-
-### Cross-Platform
-
-* Windows & Linux aware paths
-* Uses OS-appropriate data/session directories
-* No hardcoded file locations
-
----
-
-## Requirements
-
-* Python **3.10+**
-* TeamSpeak 3 ServerQuery access
-* A Matrix account + access token
-
-### Python dependencies
-
-Installed via:
-
-```bash
-pip install -r requirements.txt
-```
-
-Main libraries:
-
-* `simplematrixbotlib`
-* `matrix-nio`
-* `aiohttp`
-* `python-dotenv`
-* `ts3API`
-
----
-
-## Setup
-
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/yourname/tsmatrix_notify.git
-cd tsmatrix_notify
-```
-
-### 2. Create a virtual environment (recommended)
+## Run locally
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate   # Windows
-# or
-source .venv/bin/activate
-```
-
-### 3. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Configure environment variables
-
-Copy the example and edit it:
-
-```bash
-cp .env.example .env
-```
-
-Then set all required values in `.env`.
-
-### 5. Start the bot
-
-```bash
-python tsmatrix_notify.py
-```
-
----
-
-## Quick start (Windows PowerShell)
-
-```powershell
-py -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-Copy-Item .env.example .env
-# edit .env in your editor, then:
-python tsmatrix_notify.py
-```
-
-## Quick start (Linux/macOS)
-
-```bash
-python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# edit .env in your editor, then:
-python tsmatrix_notify.py
-```
-
----
-
-## Command-Line Options
-
-| Flag           | Description                   |
-| -------------- | ----------------------------- |
-| `--debug`      | Enable debug logging          |
-| `--trace`      | Log full Matrix SyncResponses |
-| `--no-startup` | Skip startup announcement     |
-| `--watchdog`   | Enable time-based watchdog    |
-
-Example:
-
-```bash
 python tsmatrix_notify.py --debug --watchdog
 ```
 
----
+Entrypoint command is `python tsmatrix_notify.py` and accepts `--debug`, `--trace`, `--no-startup`, and `--watchdog`.
+
+## Environment variables
+
+### Required
+
+| Variable | Description |
+|---|---|
+| `TS3_USER` | TeamSpeak ServerQuery username |
+| `TS3_PASSWORD` | TeamSpeak ServerQuery password |
+| `MATRIX_HOMESERVER` | Matrix homeserver URL (`https://...`) |
+| `MATRIX_USER_ID` | Matrix bot user ID (`@bot:example.com`) |
+| `MATRIX_ACCESS_TOKEN` | Matrix access token |
+| `MATRIX_ROOM_ID` | Destination room ID (`!room:example.com`) |
+
+### Optional
+
+| Variable | Default | Description |
+|---|---:|---|
+| `TS3_HOST` | `127.0.0.1` | TeamSpeak ServerQuery host |
+| `TS3_PORT` | `10011` | TeamSpeak ServerQuery port |
+| `TS3_VSERVER_ID` | `1` | Virtual server ID |
+| `BOT_MESSAGES_FILE` | `bot_messages.json` | Praise/apology catalog file |
+| `WATCHDOG_TIMEOUT` | `1800` | Timeout used by `--watchdog` |
+| `MATRIX_SESSION_DIR` | OS-dependent | Matrix session directory |
+| `MATRIX_SESSION_FILE` | `<session_dir>/matrix_session.json` | Matrix session file path |
+| `TSMATRIX_DATA_DIR` | OS-dependent | Runtime data dir (`bot_reviews_stats.json`) |
+| `HEALTHCHECK_HOST` | `0.0.0.0` | Health HTTP bind host |
+| `HEALTHCHECK_PORT` | `8080` | Health HTTP bind port |
+| `HEALTHCHECK_PATH_LIVE` | `/healthz/live` | Liveness path |
+| `HEALTHCHECK_PATH_READY` | `/healthz/ready` | Readiness path |
+
+> Do not commit secrets. Inject credentials using environment variables, Docker/Kubernetes secrets, or an external secret manager.
+
+## Health endpoints
+
+A lightweight HTTP server is started inside the process:
+
+- `GET /healthz/live` → process liveness (200 when healthy, 503 when shutting down)
+- `GET /healthz/ready` → readiness (200 only after Matrix startup callback completes)
+- `GET /` → basic status payload
+
+Use liveness for container restart checks and readiness for traffic gating (e.g., Kubernetes readinessProbe).
+
+## Docker
+
+### Build locally
+
+```bash
+docker build -t tsmatrix_notify:local .
+```
+
+### Run with `.env` and persistent storage
+
+```bash
+docker run -d --name tsmatrix_notify \
+  --env-file .env \
+  -v tsmatrix_notify_data:/data \
+  -p 8080:8080 \
+  ghcr.io/colonelkrud/tsmatrix_notify:latest \
+  --watchdog
+```
+
+### Persistence guidance
+
+Mount a writable volume at `/data` in containers. By default the image sets:
+
+- `TSMATRIX_DATA_DIR=/data`
+- `MATRIX_SESSION_DIR=/data/session`
+
+This preserves Matrix session state and bot stats across restarts.
+
+### GHCR image usage
+
+```bash
+docker pull ghcr.io/colonelkrud/tsmatrix_notify:latest
+# or pin an immutable tag
+docker pull ghcr.io/colonelkrud/tsmatrix_notify:sha-<shortsha>
+```
+
+## CI/CD container publishing
+
+GitHub Actions workflow `.github/workflows/docker-image.yml`:
+
+- Runs on pull requests (build validation for all PRs, plus publish for same-repo PR branches)
+- Fork PRs do not publish because GHCR publish job only runs when PR head repo matches this repository
+- Runs on pushes to `main` (build + push to GHCR)
+- Uses Buildx with GitHub Actions cache
+- Publishes tags:
+  - `latest` (default branch)
+  - `sha-<shortsha>`
+  - `pr-<number>` for same-repo pull requests
 
 ## Tests
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest -q
+pytest -q
 ```
-
-Tests use fakes and do not contact real TeamSpeak or Matrix servers.
-
----
-
-## Files Overview
-
-| File                      | Purpose                              |
-| ------------------------- | ------------------------------------ |
-| `tsmatrix_notify.py`      | Main application                     |
-| `tsmatrix_notify/`        | Hexagonal architecture package       |
-| `requirements.txt`        | Python dependencies                  |
-| `requirements-dev.txt`    | Test dependencies (optional)         |
-| `pyproject.toml`          | Tooling configuration                |
-| `.env.example`            | Sample environment file              |
-| `tsmatrix_config.py`      | Configuration loading + validation   |
-| `message_catalog.py`      | Praise/apology catalog loader        |
-| `stats_store.py`          | Review stats persistence             |
-| `.env`                    | Local secrets/config (not committed) |
-| `bot_messages.json`       | Praise/apology messages              |
-| `bot_reviews_stats.json`  | Feedback counters                    |
-| `tsmatrix_notify_run.bat` | Windows launcher                     |
-| `tests/`                  | Basic unit tests                     |
-
----
-
-## Architecture Overview (Ports & Adapters)
-
-The project is organized using a hexagonal architecture:
-
-* **Domain** (`tsmatrix_notify/domain/`): pure logic (state, message formatting, event handling).
-* **Ports** (`tsmatrix_notify/ports/`): typed interfaces for TeamSpeak, Matrix, and persistence.
-* **Adapters** (`tsmatrix_notify/adapters/`): concrete implementations (ts3API, simplematrixbotlib, filesystem).
-* **Main** (`tsmatrix_notify/main.py`): wiring, event loop, and runtime coordination.
-
----
-
-## Security Notes
-
-* **Never commit `.env`**
-* Matrix access tokens grant full account access
-* TS3 ServerQuery credentials are powerful
-* Keep logs private if they contain internal hostnames
-
----
-
-## Operational Behavior
-
-* The bot runs inside its **own asyncio loop**
-* All reconnects and restarts are automatic
-* Matrix outages are handled silently with backoff (configuration errors fail fast)
-* TS3 socket drops are detected within ~12 seconds
-* Presence reconciliation runs every 10 seconds
-
----
-
-## Known Limitations
-
-* TS3 event callbacks come from a background thread
-* State is stored in memory (not persistent)
-* Ban events may not always include `clid`
-* Message delivery is best-effort (no retry queue)
-
----
-
-## Roadmap
-
-* Async queue for TS3 → Matrix events
-* Persistent TS3 presence state
-* Admin-only Matrix commands
-* Multi-room support
-
----
-
-## License
-* GPLv3
-
----
-
-## Troubleshooting
-
-### Windows: Git "unable to create temporary file"
-
-If you see errors like `unable to create temporary file`, check the following:
-
-* **Long paths**: enable long paths in Windows Group Policy or registry.
-* **Antivirus/Defender**: exclude the repo folder to prevent locks on `.git\` temp files.
-* **Permissions**: run your shell as the same user that owns the repo.
-* **Disk issues**: ensure the drive has free space and isn't set to read-only.
-
-### Matrix or TS3 connection loops
-
-* Verify required `.env` values are present and valid (invalid Matrix homeserver URLs now stop the bot with a clear error).
-* Use `--debug` to see retry/backoff logs.
-
----
-
-## Commands
-
-| Command | Description |
-| --- | --- |
-| `!ping`, `!p` | latency check |
-| `!ts3health`, `!th` | TS3 connectivity + version |
-| `!ts3online`, `!who`, `!list` | list online TS3 users |
-| `!goodbot`, `!badbot` | feedback with stats |
-| `!restart`, `!rs` | restart the bot |
-| `!debug`, `!d` | run all diagnostics |
-| `!help`, `!h`, `!man` | show help |
