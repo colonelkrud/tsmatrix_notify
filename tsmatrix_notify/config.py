@@ -39,6 +39,15 @@ class AppConfig:
     session_dir: str
     data_dir: Path
     stats_path: Path
+    health: "HealthConfig"
+
+
+@dataclass(frozen=True)
+class HealthConfig:
+    host: str
+    port: int
+    path_live: str
+    path_ready: str
 
 
 def choose_paths(log: logging.Logger, env: dict[str, str] | None = None) -> tuple[str, str, Path, Path]:
@@ -108,6 +117,19 @@ def load_config(log: logging.Logger, env: dict[str, str] | None = None) -> AppCo
 
     bot_messages_file = env.get("BOT_MESSAGES_FILE", "bot_messages.json")
     watchdog_timeout = _get_int("WATCHDOG_TIMEOUT", "1800")
+    health_host = (env.get("HEALTHCHECK_HOST", "0.0.0.0") or "0.0.0.0").strip()
+    health_port = _get_int("HEALTHCHECK_PORT", "8080")
+    health_path_live = (env.get("HEALTHCHECK_PATH_LIVE", "/healthz/live") or "/healthz/live").strip()
+    health_path_ready = (
+        env.get("HEALTHCHECK_PATH_READY", "/healthz/ready") or "/healthz/ready"
+    ).strip()
+
+    if not health_path_live.startswith("/"):
+        health_path_live = "/" + health_path_live
+    if not health_path_ready.startswith("/"):
+        health_path_ready = "/" + health_path_ready
+    if health_port <= 0 or health_port > 65535:
+        raise ConfigError(f"HEALTHCHECK_PORT must be between 1 and 65535 (got {health_port!r}).")
 
     missing = []
     if not ts3_user:
@@ -148,4 +170,10 @@ def load_config(log: logging.Logger, env: dict[str, str] | None = None) -> AppCo
         session_dir=session_dir,
         data_dir=data_dir,
         stats_path=stats_path,
+        health=HealthConfig(
+            host=health_host,
+            port=health_port,
+            path_live=health_path_live,
+            path_ready=health_path_ready,
+        ),
     )

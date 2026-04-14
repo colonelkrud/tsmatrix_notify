@@ -5,6 +5,7 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 import random
+import signal
 import sys
 import time
 from urllib.parse import urlparse
@@ -19,6 +20,7 @@ from tsmatrix_notify.adapters.matrix_simplematrixbotlib import MatrixBotAdapter
 from tsmatrix_notify.adapters.persistence_fs import FilePersistence
 from tsmatrix_notify.adapters.ts3_ts3api import TS3APIAdapter
 from tsmatrix_notify.config import ConfigError, load_config
+from tsmatrix_notify.health import HealthServer, HealthState
 from tsmatrix_notify.domain.events import TSEvent
 from tsmatrix_notify.domain.handlers import handle_ts_event, reconcile_presence
 from tsmatrix_notify.domain.messages import build_who_body
@@ -113,16 +115,25 @@ async def await_homeserver_ready(
     log: logging.Logger,
     min_backoff: float = 5.0,
     max_backoff: float = 600.0,
-) -> None:
+    stop_event: threading.Event | None = None,
+) -> bool:
     delay = min_backoff
     while True:
+        if stop_event and stop_event.is_set():
+            return False
         ok = await probe_homeserver(hs, log)
         if ok:
-            return
+            return True
         jitter = random.uniform(0, delay / 2)
         wait = min(max_backoff, delay + jitter)
         log.info("Matrix unavailable; retrying in %.1fs (backoff=%ss)", wait, int(delay))
-        await asyncio.sleep(wait)
+        elapsed = 0.0
+        while elapsed < wait:
+            if stop_event and stop_event.is_set():
+                return False
+            step = min(1.0, wait - elapsed)
+            await asyncio.sleep(step)
+            elapsed += step
         delay = min(max_backoff, delay * 2 or min_backoff)
 
 
@@ -167,6 +178,7 @@ def run() -> int:
     load_dotenv()
     log.info("tsmatrix_notify.py starting…")
     ts3_restart_event = threading.Event()
+    stop_event = threading.Event()
     install_ts3_thread_excepthook(ts3_restart_event, log)
 
     try:
@@ -174,6 +186,33 @@ def run() -> int:
     except ConfigError as exc:
         log.error("Configuration error: %s", exc)
         return 2
+
+    health_state = HealthState(live=True, ready=False, status="starting")
+    health_server = HealthServer(
+        config.health.host,
+        config.health.port,
+        config.health.path_live,
+        config.health.path_ready,
+        health_state,
+        log,
+    )
+    health_server.start()
+
+    runtime = {"loop": None, "bot_task": None}
+
+    def _signal_handler(signum, _frame):
+        signame = signal.Signals(signum).name
+        log.info("Received %s; beginning graceful shutdown.", signame)
+        stop_event.set()
+        health_state.set_ready(False, "shutting down")
+        health_state.set_live(False, "shutting down")
+        loop = runtime.get("loop")
+        bot_task = runtime.get("bot_task")
+        if loop and bot_task and not bot_task.done():
+            loop.call_soon_threadsafe(bot_task.cancel)
+
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
 
     persistence = FilePersistence(config.bot_messages_file, config.stats_path, log)
     messages, apologies = persistence.load_message_catalog()
@@ -183,9 +222,10 @@ def run() -> int:
     matrix_supervisor = MatrixReconnectSupervisor(log)
     restart_delay: float | None = None
 
-    while True:
+    while not stop_event.is_set():
         main_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(main_loop)
+        runtime["loop"] = main_loop
 
         api_ready = asyncio.Event()
         heartbeat_task = None
@@ -196,9 +236,15 @@ def run() -> int:
         normalized_homeserver = None
 
         try:
+            health_state.set_ready(False, "starting")
             normalized_homeserver = validate_and_normalize_homeserver(config.matrix.homeserver, log)
             if normalized_homeserver:
-                main_loop.run_until_complete(await_homeserver_ready(normalized_homeserver, log))
+                homeserver_ready = main_loop.run_until_complete(
+                    await_homeserver_ready(normalized_homeserver, log, stop_event=stop_event)
+                )
+                if not homeserver_ready:
+                    log.info("Shutdown requested while waiting for homeserver readiness.")
+                    break
 
             _, creds = build_matrix_creds(
                 config.matrix, log, normalized_homeserver=normalized_homeserver
@@ -270,6 +316,7 @@ def run() -> int:
 
                 api_ready.set()
                 startup_once.set()
+                health_state.set_ready(True, "ready")
 
                 now = time.time()
                 for client in ts3.clientlist():
@@ -511,6 +558,7 @@ def run() -> int:
                 await bot.main()
 
             bot_task = main_loop.create_task(run_bot_main())
+            runtime["bot_task"] = bot_task
 
             async def _sync_rate_watchdog():
                 nonlocal sync_count_60s
@@ -521,6 +569,7 @@ def run() -> int:
                         sync_count_60s = 0
                         if startup_once.is_set() and count == 0:
                             log.warning("sync-rate watchdog: no SyncResponse in last 60s; restarting Matrix loop.")
+                            health_state.set_ready(False, "matrix sync stalled; restarting")
                             bot_task.cancel()
                             return
                 except asyncio.CancelledError:
@@ -536,8 +585,10 @@ def run() -> int:
                 main_loop.run_until_complete(bot_task)
 
             if not startup_once.is_set():
+                health_state.set_ready(False, "startup incomplete; restarting")
                 log.warning("Matrix main returned but no on_startup observed; restarting.")
             else:
+                health_state.set_ready(False, "restarting")
                 log.info("Matrix main returned; restarting bridge.")
             main_loop.run_until_complete(shutdown_bot(bot, log))
 
@@ -557,6 +608,7 @@ def run() -> int:
                     pass
             elif isinstance(exc, KeyboardInterrupt):
                 log.info("Shutdown via KeyboardInterrupt")
+                stop_event.set()
                 main_loop.run_until_complete(shutdown_bot(bot, log))
                 break
             else:
@@ -566,8 +618,10 @@ def run() -> int:
                     except Exception:
                         pass
                     restart_delay = matrix_supervisor.next_delay()
+                    health_state.set_ready(False, "manual restart requested")
                     log.warning("Restart requested; retrying in %.1fs", restart_delay)
                 else:
+                    health_state.set_ready(False, f"error: {et}")
                     restart_delay = matrix_supervisor.handle_error(exc)
                 try:
                     main_loop.run_until_complete(shutdown_bot(bot, log))
@@ -594,12 +648,17 @@ def run() -> int:
                     except Exception:
                         log.exception("Error stopping TS3 connection during shutdown")
                 main_loop.close()
+                runtime["bot_task"] = None
+                runtime["loop"] = None
 
+        if stop_event.is_set():
+            break
         delay = restart_delay if restart_delay is not None else matrix_supervisor.next_delay()
         log.info("Restarting in %.1fs…", delay)
-        time.sleep(delay)
+        stop_event.wait(timeout=delay)
         restart_delay = None
 
+    health_server.stop()
     return 0
 
 

@@ -31,3 +31,5 @@ def test_load_config_with_overrides(tmp_path):
     assert cfg.ts3.port == 10011
     assert cfg.matrix.room_id == "!roomid:example.com"
     assert Path(cfg.matrix.session_file).parent == Path(env["MATRIX_SESSION_DIR"])
+    assert cfg.health.host == "0.0.0.0"
+    assert cfg.health.port == 8080
