@@ -115,16 +115,25 @@ async def await_homeserver_ready(
     log: logging.Logger,
     min_backoff: float = 5.0,
     max_backoff: float = 600.0,
-) -> None:
+    stop_event: threading.Event | None = None,
+) -> bool:
     delay = min_backoff
     while True:
+        if stop_event and stop_event.is_set():
+            return False
         ok = await probe_homeserver(hs, log)
         if ok:
-            return
+            return True
         jitter = random.uniform(0, delay / 2)
         wait = min(max_backoff, delay + jitter)
         log.info("Matrix unavailable; retrying in %.1fs (backoff=%ss)", wait, int(delay))
-        await asyncio.sleep(wait)
+        elapsed = 0.0
+        while elapsed < wait:
+            if stop_event and stop_event.is_set():
+                return False
+            step = min(1.0, wait - elapsed)
+            await asyncio.sleep(step)
+            elapsed += step
         delay = min(max_backoff, delay * 2 or min_backoff)
 
 
@@ -195,6 +204,7 @@ def run() -> int:
         signame = signal.Signals(signum).name
         log.info("Received %s; beginning graceful shutdown.", signame)
         stop_event.set()
+        health_state.set_ready(False, "shutting down")
         health_state.set_live(False, "shutting down")
         loop = runtime.get("loop")
         bot_task = runtime.get("bot_task")
@@ -229,7 +239,12 @@ def run() -> int:
             health_state.set_ready(False, "starting")
             normalized_homeserver = validate_and_normalize_homeserver(config.matrix.homeserver, log)
             if normalized_homeserver:
-                main_loop.run_until_complete(await_homeserver_ready(normalized_homeserver, log))
+                homeserver_ready = main_loop.run_until_complete(
+                    await_homeserver_ready(normalized_homeserver, log, stop_event=stop_event)
+                )
+                if not homeserver_ready:
+                    log.info("Shutdown requested while waiting for homeserver readiness.")
+                    break
 
             _, creds = build_matrix_creds(
                 config.matrix, log, normalized_homeserver=normalized_homeserver
@@ -640,7 +655,7 @@ def run() -> int:
             break
         delay = restart_delay if restart_delay is not None else matrix_supervisor.next_delay()
         log.info("Restarting in %.1fs…", delay)
-        time.sleep(delay)
+        stop_event.wait(timeout=delay)
         restart_delay = None
 
     health_server.stop()
