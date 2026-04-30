@@ -145,7 +145,7 @@ class TS3APIAdapter(TS3Port):
             except Exception:
                 pass
 
-        self._safe = TS3Safe(_factory, _post_connect, log, notify_binder=lambda c, l: self._bind_notifies(c))
+        self._safe = TS3Safe(_factory, _post_connect, log, notify_binder=lambda conn, _log: self._bind_notifies(conn))
 
     def version(self) -> str:
         def _version(conn: TS3Connection):

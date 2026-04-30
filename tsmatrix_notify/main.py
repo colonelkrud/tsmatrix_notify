@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 import logging
 import random
 import signal
-import sys
 import time
 from urllib.parse import urlparse
 import threading
@@ -37,12 +36,12 @@ SYNC_LEVEL_NUM = 5
 logging.addLevelName(SYNC_LEVEL_NUM, "SYNC")
 
 
-def _sync(self, message, *args, **kwargs):
+def _sync(self: logging.Logger, message: str, *args: object, **kwargs: object) -> None:
     if self.isEnabledFor(SYNC_LEVEL_NUM):
-        self._log(SYNC_LEVEL_NUM, message, args, **kwargs)  # pylint: disable=W0212
+        self._log(SYNC_LEVEL_NUM, message, args, **kwargs)  # type: ignore[arg-type]  # pylint: disable=W0212
 
 
-logging.Logger.sync = _sync
+setattr(logging.Logger, "sync", _sync)
 
 
 def setup_logger(debug: bool, trace: bool):
@@ -97,7 +96,8 @@ async def probe_homeserver(hs: str, log: logging.Logger, timeout_s: int = 6) -> 
     url = hs.rstrip("/") + "/_matrix/client/versions"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=timeout_s) as response:
+            timeout = aiohttp.ClientTimeout(total=float(timeout_s))
+            async with session.get(url, timeout=timeout) as response:
                 _ = await response.read()
                 ok = 200 <= response.status < 300
                 if ok:
@@ -172,7 +172,7 @@ def connect_matrix(creds, log):
     return bot
 
 
-def run() -> int:
+def run() -> int:  # pragma: no cover - exercised via integration/runtime execution
     args = parse_args()
     log = setup_logger(args.debug, args.trace)
     load_dotenv()
@@ -198,7 +198,7 @@ def run() -> int:
     )
     health_server.start()
 
-    runtime = {"loop": None, "bot_task": None}
+    runtime: dict[str, asyncio.AbstractEventLoop | asyncio.Task[object] | None] = {"loop": None, "bot_task": None}
 
     def _signal_handler(signum, _frame):
         signame = signal.Signals(signum).name
@@ -208,7 +208,7 @@ def run() -> int:
         health_state.set_live(False, "shutting down")
         loop = runtime.get("loop")
         bot_task = runtime.get("bot_task")
-        if loop and bot_task and not bot_task.done():
+        if isinstance(loop, asyncio.AbstractEventLoop) and isinstance(bot_task, asyncio.Task) and not bot_task.done():
             loop.call_soon_threadsafe(bot_task.cancel)
 
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -272,7 +272,8 @@ def run() -> int:
                 url = hs.rstrip("/") + "/_matrix/client/versions"
                 try:
                     async with aiohttp.ClientSession() as session:
-                        async with session.get(url, timeout=timeout_s) as response:
+                        timeout = aiohttp.ClientTimeout(total=float(timeout_s))
+                        async with session.get(url, timeout=timeout) as response:
                             txt = await response.text()
                             log.info("versions probe: %s -> %s len=%d", url, response.status, len(txt))
                 except Exception as exc:

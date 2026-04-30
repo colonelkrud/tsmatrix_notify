@@ -120,6 +120,27 @@ helm pull oci://ghcr.io/colonelkrud/charts/tsmatrix-notify --version <chart-vers
 - `TS3_PORT` and `HEALTHCHECK_PORT` must be between 1 and 65535; `TS3_VSERVER_ID` must be a positive integer.
 - Health paths are normalized to begin with `/`.
 - `MATRIX_ACCESS_TOKEN` is required and redacted in config logs.
+
+## Resiliency and failure handling
+
+- **TS3 reconnect supervisor** monitors the TS3 receive loop and treats recv-thread exits as a fault condition. On failure it emits `TS3 reconnecting…` logs and retries with bounded backoff until the adapter is healthy again.
+- **Matrix resilience** starts with a homeserver `/versions` probe (`versions probe` in logs) before long-running sync usage. Transient failures (timeouts, temporary transport errors, 5xx responses) are retried; non-transient failures (invalid config/auth/permanent protocol errors) fail fast so operators can intervene.
+- **Sync-rate watchdog** (optional `--watchdog`) detects stalled Matrix sync activity and triggers a supervised restart path. Look for `sync-rate watchdog` log lines indicating degraded cadence and restart attempts.
+- **Failure-injection test coverage** validates these behaviors using deterministic fakes from PR #21. Run with:
+
+```bash
+python -m pytest -q
+```
+
+  Covered scenarios include TS3 recv-loop crashes, Matrix probe/sync failures, retry classification, and watchdog-triggered restart flows.
+
+### Troubleshooting checklist
+
+1. Confirm configuration validation passes (homeserver URL, user ID, room ID, secrets).
+2. Search logs for `TS3 reconnecting…`, `versions probe`, and `sync-rate watchdog` to identify which supervisor path is active.
+3. If reconnect loops persist, verify TS3 query credentials/network reachability and Matrix token validity.
+4. Re-run `python -m pytest -q` locally to verify regressions are not introduced before redeploying.
+
 ## CI and release workflows
 
 - CI (`.github/workflows/ci.yml`): tests, Docker build validation, Helm lint/template.
