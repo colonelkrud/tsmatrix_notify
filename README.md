@@ -25,7 +25,7 @@ Entrypoint command is `python tsmatrix_notify.py` and accepts `--debug`, `--trac
 | `MATRIX_HOMESERVER` | Matrix homeserver URL (`https://...`) |
 | `MATRIX_USER_ID` | Matrix bot user ID (`@bot:example.com`) |
 | `MATRIX_ACCESS_TOKEN` | Matrix access token |
-| `MATRIX_ROOM_ID` | Destination room ID (`!room:example.com`) |
+| `MATRIX_ROOM_ID` | Destination room ID (`!room:example.com`) or room alias (`#ops:example.com`) |
 
 ### Optional
 
@@ -111,3 +111,13 @@ GitHub Actions workflow `.github/workflows/docker-image.yml`:
 pip install -r requirements-dev.txt
 pytest -q
 ```
+
+
+### Validation and secret handling
+
+- `MATRIX_HOMESERVER` must be an `http://` or `https://` URL with a host.
+- `MATRIX_USER_ID` must match `@user:server`.
+- `MATRIX_ROOM_ID` must match `!room:server` or `#alias:server`.
+- `TS3_PORT` and `HEALTHCHECK_PORT` must be between 1 and 65535; `TS3_VSERVER_ID` must be a positive integer.
+- Health paths are normalized to begin with `/`.
+- `MATRIX_ACCESS_TOKEN` is required and redacted in config logs.
