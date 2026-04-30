@@ -30,7 +30,7 @@ jobs:
       - name: Detect changed charts
         id: changed
         run: |
-          changed="$(ct list-changed --config .github/ct/ct.yaml --target-branch origin/main)"
+          changed="$(ct list-changed --config .github/ct/ct.yaml --target-branch main)"
           echo "changed<<EOF" >> "$GITHUB_OUTPUT"
           echo "$changed" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
@@ -41,7 +41,7 @@ jobs:
           fi
       - name: Lint changed charts
         if: steps.changed.outputs.has_changes == 'true'
-        run: ct lint --config .github/ct/ct.yaml --target-branch origin/main
+        run: ct lint --config .github/ct/ct.yaml --target-branch main
       - name: No chart changes detected
         if: steps.changed.outputs.has_changes != 'true'
         run: echo "No chart changes detected; skipping ct lint."
