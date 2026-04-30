@@ -1,4 +1,5 @@
 import logging
+
 from tsmatrix_notify.adapters import ts3_ts3api
 
 
@@ -39,14 +40,9 @@ class DummyConn:
 
 
 def test_ts3safe_call_and_reconnect_path():
-    conn1 = DummyConn()
-    conn2 = DummyConn()
+    conn1, conn2 = DummyConn(), DummyConn()
     seq = [conn1, conn2]
-
-    def factory():
-        return seq.pop(0)
-
-    safe = ts3_ts3api.TS3Safe(factory, post_connect=None, log=logging.getLogger("test"))
+    safe = ts3_ts3api.TS3Safe(lambda: seq.pop(0), post_connect=None, log=logging.getLogger("test"))
 
     def fn_fail_once(conn):
         if conn is conn1:
@@ -56,17 +52,28 @@ def test_ts3safe_call_and_reconnect_path():
     assert safe.call(fn_fail_once) == "ok"
 
 
+def test_ts3safe_reconnect_explicit():
+    conn1, conn2 = DummyConn(), DummyConn()
+    seq = [conn1, conn2]
+    safe = ts3_ts3api.TS3Safe(lambda: seq.pop(0), post_connect=lambda c: c.start_keepalive_loop(), log=logging.getLogger("test"))
+    safe.reconnect()
+    assert "quit" in conn1.called
+    assert "start" in conn2.called
+
+
 def test_adapter_basic_methods_and_bind(monkeypatch):
     conn = DummyConn()
     monkeypatch.setattr(ts3_ts3api, "connect_ts3", lambda *args, **kwargs: conn)
 
     adapter = ts3_ts3api.TS3APIAdapter("h", 10011, "u", "p", 1, logging.getLogger("test"))
-    received = []
-    adapter.register_event_handler(lambda ev: received.append(ev.kind))
+    adapter.register_event_handler(lambda _ev: None)
     assert adapter.version() == "1.2.3"
     assert adapter.clientinfo("7") == {"clid": "7"}
     assert adapter.clientlist() == [{"clid": "1"}]
     assert adapter.hostinfo() == {"host": "h"}
     assert adapter.serverinfo() == {"server": "s"}
+    adapter.start_keepalive()
+    adapter.stop_keepalive()
     adapter.close()
     assert "quit" in conn.called
+    assert conn._notifies_bound is True

@@ -10,48 +10,43 @@ from tsmatrix_notify.config import ConfigError, MatrixConfig
 
 
 def test_validate_and_normalize_homeserver_ok():
-    log = logging.getLogger("test")
-    assert main.validate_and_normalize_homeserver("https://example.org/", log) == "https://example.org"
+    assert main.validate_and_normalize_homeserver("https://example.org/", logging.getLogger("test")) == "https://example.org"
 
 
 def test_validate_and_normalize_homeserver_bad():
-    log = logging.getLogger("test")
     with pytest.raises(ConfigError):
-        main.validate_and_normalize_homeserver("not-a-url", log)
+        main.validate_and_normalize_homeserver("not-a-url", logging.getLogger("test"))
 
 
-@pytest.mark.asyncio
-async def test_await_homeserver_ready_stops(monkeypatch):
-    log = logging.getLogger("test")
+def test_await_homeserver_ready_stops_immediately():
     stop_event = SimpleNamespace(is_set=lambda: True)
-    ok = await main.await_homeserver_ready("https://example.org", log, stop_event=stop_event)
+    ok = asyncio.run(main.await_homeserver_ready("https://example.org", logging.getLogger("test"), stop_event=stop_event))
     assert ok is False
 
 
-@pytest.mark.asyncio
-async def test_await_homeserver_ready_success(monkeypatch):
-    log = logging.getLogger("test")
+def test_await_homeserver_ready_success(monkeypatch):
     calls = {"n": 0}
 
     async def fake_probe(*_args, **_kwargs):
         calls["n"] += 1
         return calls["n"] >= 2
 
+    async def fake_sleep(_s: float):
+        return None
+
     monkeypatch.setattr(main, "probe_homeserver", fake_probe)
     monkeypatch.setattr(main.random, "uniform", lambda _a, _b: 0.0)
-    monkeypatch.setattr(main.asyncio, "sleep", lambda _s: asyncio.sleep(0))
-    ok = await main.await_homeserver_ready("https://example.org", log, min_backoff=0.01, max_backoff=0.01)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    ok = asyncio.run(main.await_homeserver_ready("https://example.org", logging.getLogger("test"), min_backoff=0.01, max_backoff=0.01))
     assert ok is True
 
 
+def test_probe_homeserver_false_on_empty():
+    assert asyncio.run(main.probe_homeserver("", logging.getLogger("test"))) is False
+
+
 def test_build_matrix_creds_uses_normalized():
-    cfg = MatrixConfig(
-        homeserver="https://example.org/",
-        user_id="@u:example.org",
-        access_token="tok",
-        room_id="!r:example.org",
-        session_file="/tmp/session.json",
-    )
+    cfg = MatrixConfig("https://example.org/", "@u:example.org", "tok", "!r:example.org", "/tmp/session.json")
     hs, creds = main.build_matrix_creds(cfg, logging.getLogger("test"))
     assert hs == "https://example.org"
     assert creds.homeserver == "https://example.org"
