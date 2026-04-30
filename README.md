@@ -125,7 +125,9 @@ helm pull oci://ghcr.io/colonelkrud/charts/tsmatrix-notify --version <chart-vers
 
 - **TS3 reconnect supervisor** monitors the TS3 receive loop and treats recv-thread exits as a fault condition. On failure it emits `TS3 reconnecting…` logs and retries with bounded backoff until the adapter is healthy again.
 - **Matrix resilience** starts with a homeserver `/versions` probe (`versions probe` in logs) before long-running sync usage. Transient failures (timeouts, temporary transport errors, 5xx responses) are retried; non-transient failures (invalid config/auth/permanent protocol errors) fail fast so operators can intervene.
-- **Sync-rate watchdog** (optional `--watchdog`) detects stalled Matrix sync activity and triggers a supervised restart path. Look for `sync-rate watchdog` log lines indicating degraded cadence and restart attempts.
+- **Sync-rate watchdog** (optional `--watchdog`) tracks the last successful Matrix sync timestamp and per-interval sync counts. When no syncs occur across the configured interval threshold, it emits `matrix_sync_stalled` with `last_successful_sync_at`, `seconds_since_last_sync`, `sync_count`, and `configured_threshold`, then restarts the Matrix loop.
+- **Structured restart reasons** are emitted as stable log messages/fields: `matrix_sync_stalled`, `matrix_sync_exception`, `matrix_send_failure`, and `shutdown_requested`.
+- **Correlation IDs** are generated for each TS3 notify and carried through TS3 receive, domain translation, dispatch decision, Matrix send attempt, and Matrix send success/failure logs via `correlation_id`.
 - **Failure-injection test coverage** validates these behaviors using deterministic fakes from PR #21. Run with:
 
 ```bash
@@ -137,9 +139,10 @@ python -m pytest -q
 ### Troubleshooting checklist
 
 1. Confirm configuration validation passes (homeserver URL, user ID, room ID, secrets).
-2. Search logs for `TS3 reconnecting…`, `versions probe`, and `sync-rate watchdog` to identify which supervisor path is active.
-3. If reconnect loops persist, verify TS3 query credentials/network reachability and Matrix token validity.
-4. Re-run `python -m pytest -q` locally to verify regressions are not introduced before redeploying.
+2. Search logs for `TS3 reconnecting…`, `versions probe`, `matrix_sync_stalled`, `matrix_sync_exception`, and `matrix_send_failure` to identify which supervisor path is active.
+3. Trace individual TS3→Matrix deliveries by filtering logs on `correlation_id=<id>` and checking `ts3_notify_received` → `dispatch_decision` → `matrix_send_attempt` / `matrix_send_success` or `matrix_send_failure`.
+4. If reconnect loops persist, verify TS3 query credentials/network reachability and Matrix token validity.
+5. Re-run `python -m pytest -q` locally to verify regressions are not introduced before redeploying.
 
 ## CI and release workflows
 

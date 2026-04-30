@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import logging
 import random
 import threading
@@ -52,6 +53,36 @@ class ExponentialBackoff:
 
     def reset(self) -> None:
         self._current = None
+
+
+@dataclass
+class SyncWatchdogState:
+    stall_threshold_s: int = 60
+    sync_count: int = 0
+    last_successful_sync_at: float | None = None
+
+    def mark_sync_success(self, now: float) -> None:
+        self.last_successful_sync_at = now
+        self.sync_count += 1
+
+    def consume_interval_count(self) -> int:
+        count = self.sync_count
+        self.sync_count = 0
+        return count
+
+    def stall_context(self, now: float) -> dict[str, object]:
+        seconds_since = None if self.last_successful_sync_at is None else max(0.0, now - self.last_successful_sync_at)
+        iso = (
+            None
+            if self.last_successful_sync_at is None
+            else datetime.fromtimestamp(self.last_successful_sync_at, tz=timezone.utc).isoformat()
+        )
+        return {
+            "restart_reason": "matrix_sync_stalled",
+            "last_successful_sync_at": iso,
+            "seconds_since_last_sync": seconds_since,
+            "configured_threshold": self.stall_threshold_s,
+        }
 
 
 class MatrixReconnectSupervisor:

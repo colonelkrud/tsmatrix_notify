@@ -9,6 +9,7 @@ import signal
 import time
 from urllib.parse import urlparse
 import threading
+import uuid
 
 import aiohttp
 from dotenv import load_dotenv
@@ -27,6 +28,7 @@ from tsmatrix_notify.domain.state import AppState
 from tsmatrix_notify.application.dispatcher import send_actions, send_actions_if_ready
 from tsmatrix_notify.application.supervisors import (
     MatrixReconnectSupervisor,
+    SyncWatchdogState,
     TS3ReconnectSupervisor,
     install_ts3_thread_excepthook,
 )
@@ -218,7 +220,7 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
     messages, apologies = persistence.load_message_catalog()
 
     state = AppState()
-    sync_count_60s = 0
+    sync_watchdog = SyncWatchdogState(stall_threshold_s=60)
     matrix_supervisor = MatrixReconnectSupervisor(log)
     restart_delay: float | None = None
 
@@ -265,8 +267,7 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
             ts3_supervisor = TS3ReconnectSupervisor(ts3, ts3_restart_event, log)
 
             def _on_sync_response(resp: SyncResponse):
-                nonlocal sync_count_60s
-                sync_count_60s += 1
+                sync_watchdog.mark_sync_success(time.time())
 
             async def _matrix_http_versions(hs: str, timeout_s: int = 6):
                 url = hs.rstrip("/") + "/_matrix/client/versions"
@@ -297,7 +298,11 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
             main_loop.create_task(_matrix_whoami("post-connect"))
 
             def ts3_event_handler(event: TSEvent):
-                actions = handle_ts_event(event, state, room_id, time.time())
+                correlation_id = event.correlation_id or str(uuid.uuid4())
+                log.info("ts3_notify_received", extra={"correlation_id": correlation_id, "event_type": event.kind, "ts3_event": event.kind, "ts3_client_id": event.data.get("clid"), "ts3_client_name": event.data.get("client_nickname")})
+                translated = TSEvent(kind=event.kind, data=event.data, correlation_id=correlation_id)
+                actions = handle_ts_event(translated, state, room_id, time.time())
+                log.info("dispatch_decision", extra={"correlation_id": correlation_id, "event_type": event.kind, "matrix_room_id": room_id, "action_count": len(actions)})
                 send_actions(matrix, actions, log)
 
             ts3.register_event_handler(ts3_event_handler)
@@ -562,14 +567,14 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
             runtime["bot_task"] = bot_task
 
             async def _sync_rate_watchdog():
-                nonlocal sync_count_60s
                 try:
                     while True:
                         await asyncio.sleep(60)
-                        count = sync_count_60s
-                        sync_count_60s = 0
+                        count = sync_watchdog.consume_interval_count()
                         if startup_once.is_set() and count == 0:
-                            log.warning("sync-rate watchdog: no SyncResponse in last 60s; restarting Matrix loop.")
+                            ctx = sync_watchdog.stall_context(time.time())
+                            ctx["sync_count"] = count
+                            log.warning("matrix_sync_stalled", extra=ctx)
                             health_state.set_ready(False, "matrix sync stalled; restarting")
                             bot_task.cancel()
                             return
@@ -594,6 +599,7 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
             main_loop.run_until_complete(shutdown_bot(bot, log))
 
         except ConfigError as exc:
+            log.warning("matrix_sync_exception", extra={"restart_reason": "matrix_sync_exception", "error_type": type(exc).__name__})
             restart_delay = matrix_supervisor.handle_error(exc)
             try:
                 main_loop.run_until_complete(shutdown_bot(bot, log))
@@ -620,9 +626,11 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
                         pass
                     restart_delay = matrix_supervisor.next_delay()
                     health_state.set_ready(False, "manual restart requested")
+                    log.warning("shutdown_requested", extra={"restart_reason": "shutdown_requested"})
                     log.warning("Restart requested; retrying in %.1fs", restart_delay)
                 else:
                     health_state.set_ready(False, f"error: {et}")
+                    log.warning("matrix_sync_exception", extra={"restart_reason": "matrix_sync_exception", "error_type": et})
                     restart_delay = matrix_supervisor.handle_error(exc)
                 try:
                     main_loop.run_until_complete(shutdown_bot(bot, log))

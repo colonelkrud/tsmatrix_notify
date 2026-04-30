@@ -21,6 +21,8 @@ class MatrixAction:
     room_id: str
     text: str
     clid: str | None = None
+    correlation_id: str | None = None
+    event_type: str | None = None
 
 
 def handle_ts_event(event: events.TSEvent, state: AppState, room_id: str, now: float) -> list[MatrixAction]:
@@ -69,7 +71,15 @@ def handle_ts_event(event: events.TSEvent, state: AppState, room_id: str, now: f
         state.join_times.pop(cldbid, None)
 
     if text:
-        actions.append(MatrixAction(room_id=room_id, text=text, clid=data.get("clid")))
+        actions.append(
+            MatrixAction(
+                room_id=room_id,
+                text=text,
+                clid=data.get("clid"),
+                correlation_id=event.correlation_id,
+                event_type=event.kind,
+            )
+        )
     return actions
 
 

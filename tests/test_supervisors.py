@@ -5,6 +5,7 @@ import threading
 from tsmatrix_notify.application.supervisors import (
     ExponentialBackoff,
     MatrixReconnectSupervisor,
+    SyncWatchdogState,
     TS3ReconnectSupervisor,
     make_ts3_thread_excepthook,
 )
@@ -79,3 +80,20 @@ def test_matrix_transient_error_uses_backoff():
     delay = supervisor.handle_error(asyncio.TimeoutError("timeout"))
 
     assert delay == 2.0
+
+
+def test_sync_watchdog_tracks_count_and_last_success():
+    state = SyncWatchdogState(stall_threshold_s=30)
+    state.mark_sync_success(100.0)
+    state.mark_sync_success(120.0)
+    assert state.last_successful_sync_at == 120.0
+    assert state.consume_interval_count() == 2
+    assert state.consume_interval_count() == 0
+
+
+def test_sync_watchdog_stall_context():
+    state = SyncWatchdogState(stall_threshold_s=60)
+    state.mark_sync_success(40.0)
+    context = state.stall_context(100.0)
+    assert context["restart_reason"] == "matrix_sync_stalled"
+    assert context["seconds_since_last_sync"] == 60.0
