@@ -7,8 +7,8 @@ TeamSpeak 3 ➜ Matrix notification bridge. It subscribes to TeamSpeak events an
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest -q
 python tsmatrix_notify.py --debug --watchdog
 ```
 
@@ -44,72 +44,71 @@ Entrypoint command is `python tsmatrix_notify.py` and accepts `--debug`, `--trac
 | `HEALTHCHECK_PATH_LIVE` | `/healthz/live` | Liveness path |
 | `HEALTHCHECK_PATH_READY` | `/healthz/ready` | Readiness path |
 
-> Do not commit secrets. Inject credentials using environment variables, Docker/Kubernetes secrets, or an external secret manager.
-
-## Health endpoints
-
-A lightweight HTTP server is started inside the process:
-
-- `GET /healthz/live` → process liveness (200 when healthy, 503 when shutting down)
-- `GET /healthz/ready` → readiness (200 only after Matrix startup callback completes)
-- `GET /` → basic status payload
-
-Use liveness for container restart checks and readiness for traffic gating (e.g., Kubernetes readinessProbe).
+> Security note: never commit credentials or `.env` files. Inject secrets at runtime via Docker/Helm/Kubernetes secrets or an external secret manager.
 
 ## Docker
 
-### Build locally
+Build:
 
 ```bash
-docker build -t tsmatrix_notify:local .
+docker build -t ghcr.io/colonelkrud/tsmatrix_notify:local .
 ```
 
-### Run with `.env` and persistent storage
+Run:
 
 ```bash
-docker run -d --name tsmatrix_notify \
+docker run --rm --name tsmatrix-notify \
   --env-file .env \
-  -v tsmatrix_notify_data:/data \
   -p 8080:8080 \
-  ghcr.io/colonelkrud/tsmatrix_notify:latest \
+  -v tsmatrix_notify_data:/data \
+  ghcr.io/colonelkrud/tsmatrix_notify:local \
   --watchdog
 ```
 
-### Persistence guidance
-
-Mount a writable volume at `/data` in containers. By default the image sets:
-
-- `TSMATRIX_DATA_DIR=/data`
-- `MATRIX_SESSION_DIR=/data/session`
-
-This preserves Matrix session state and bot stats across restarts.
-
-### GHCR image usage
+GHCR image:
 
 ```bash
 docker pull ghcr.io/colonelkrud/tsmatrix_notify:latest
-# or pin an immutable tag
 docker pull ghcr.io/colonelkrud/tsmatrix_notify:sha-<shortsha>
 ```
 
-## CI/CD container publishing
+## Helm
 
-GitHub Actions workflow `.github/workflows/docker-image.yml`:
+Chart path: `charts/tsmatrix-notify`.
 
-- Runs on pull requests (build validation for all PRs, plus publish for same-repo PR branches)
-- Fork PRs do not publish because GHCR publish job only runs when PR head repo matches this repository
-- Runs on pushes to `main` (build + push to GHCR)
-- Uses Buildx with GitHub Actions cache
-- Publishes tags:
-  - `latest` (default branch)
-  - `sha-<shortsha>`
-  - `pr-<number>` for same-repo pull requests
-
-## Tests
+Install with existing secret:
 
 ```bash
-pip install -r requirements-dev.txt
-pytest -q
+kubectl create secret generic tsmatrix-notify-secrets \
+  --from-literal=MATRIX_ACCESS_TOKEN='***' \
+  --from-literal=TS3_USER='serverquery' \
+  --from-literal=TS3_PASSWORD='***'
+
+helm upgrade --install tsmatrix-notify ./charts/tsmatrix-notify \
+  --set config.matrixHomeserver=https://matrix.example.org \
+  --set config.matrixUserId='@bot:example.org' \
+  --set config.matrixRoomId='!room:example.org' \
+  --set existingSecret.enabled=true \
+  --set existingSecret.name=tsmatrix-notify-secrets
+```
+
+Install with chart-managed secret (still provided at deploy-time):
+
+```bash
+helm upgrade --install tsmatrix-notify ./charts/tsmatrix-notify \
+  --set config.matrixHomeserver=https://matrix.example.org \
+  --set config.matrixUserId='@bot:example.org' \
+  --set config.matrixRoomId='!room:example.org' \
+  --set secret.create=true \
+  --set secret.matrixAccessToken='***' \
+  --set secret.ts3User='serverquery' \
+  --set secret.ts3Password='***'
+```
+
+Chart OCI package usage (release workflow output):
+
+```bash
+helm pull oci://ghcr.io/colonelkrud/charts/tsmatrix-notify --version <chart-version>
 ```
 
 
@@ -121,3 +120,14 @@ pytest -q
 - `TS3_PORT` and `HEALTHCHECK_PORT` must be between 1 and 65535; `TS3_VSERVER_ID` must be a positive integer.
 - Health paths are normalized to begin with `/`.
 - `MATRIX_ACCESS_TOKEN` is required and redacted in config logs.
+## CI and release workflows
+
+- CI (`.github/workflows/ci.yml`): tests, Docker build validation, Helm lint/template.
+- Helm chart-testing (`.github/workflows/helm-ct.yml`): lints chart changes.
+- Release (`.github/workflows/release.yml`): pushes Docker images and chart packages to GHCR on semver tags.
+
+## Health endpoints
+
+- `GET /healthz/live` → process liveness.
+- `GET /healthz/ready` → readiness after Matrix startup callback completes.
+- `GET /` → basic status payload.
