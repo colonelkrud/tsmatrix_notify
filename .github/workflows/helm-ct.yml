@@ -1,8 +1,15 @@
 name: Helm chart-testing
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'charts/**'
+      - '.github/ct/**'
+      - '.github/workflows/helm-ct.yml'
   pull_request:
     paths:
       - 'charts/**'
+      - '.github/ct/**'
       - '.github/workflows/helm-ct.yml'
 
 permissions:
@@ -11,7 +18,30 @@ permissions:
 jobs:
   ct-lint:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Fetch target branch for ct
+        run: git fetch --no-tags --prune --depth=1 origin main:refs/remotes/origin/main
       - uses: helm/chart-testing-action@v2.6.1
-      - run: ct lint --config .github/ct/ct.yaml
+      - name: Detect changed charts
+        id: changed
+        run: |
+          changed="$(ct list-changed --config .github/ct/ct.yaml --target-branch origin/main)"
+          echo "changed<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$changed" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          if [ -n "$changed" ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Lint changed charts
+        if: steps.changed.outputs.has_changes == 'true'
+        run: ct lint --config .github/ct/ct.yaml --target-branch origin/main
+      - name: No chart changes detected
+        if: steps.changed.outputs.has_changes != 'true'
+        run: echo "No chart changes detected; skipping ct lint."
