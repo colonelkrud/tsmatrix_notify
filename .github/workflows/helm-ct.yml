@@ -1,0 +1,17 @@
+name: Helm chart-testing
+on:
+  pull_request:
+    paths:
+      - 'charts/**'
+      - '.github/workflows/helm-ct.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  ct-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/chart-testing-action@v2.6.1
+      - run: ct lint --config .github/ct/ct.yaml

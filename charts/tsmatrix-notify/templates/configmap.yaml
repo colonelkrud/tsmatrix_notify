@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tsmatrix-notify.fullname" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "tsmatrix-notify.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  TS3_HOST: {{ .Values.config.ts3Host | quote }}
+  TS3_PORT: {{ .Values.config.ts3Port | quote }}
+  TS3_VSERVER_ID: {{ .Values.config.ts3VserverId | quote }}
+  MATRIX_HOMESERVER: {{ .Values.config.matrixHomeserver | quote }}
+  MATRIX_USER_ID: {{ .Values.config.matrixUserId | quote }}
+  MATRIX_ROOM_ID: {{ .Values.config.matrixRoomId | quote }}
+  WATCHDOG_TIMEOUT: {{ .Values.config.watchdogTimeout | quote }}
+  HEALTHCHECK_PORT: {{ .Values.config.healthPort | quote }}

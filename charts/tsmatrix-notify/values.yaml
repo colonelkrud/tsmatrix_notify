@@ -1,0 +1,73 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/colonelkrud/tsmatrix_notify
+  pullPolicy: IfNotPresent
+  tag: ""
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+extraEnv: []
+
+config:
+  ts3Host: "127.0.0.1"
+  ts3Port: 10011
+  ts3VserverId: 1
+  matrixHomeserver: ""
+  matrixUserId: ""
+  matrixRoomId: ""
+  watchdogTimeout: 1800
+  healthPort: 8080
+
+secret:
+  create: false
+  name: ""
+  matrixAccessToken: ""
+  ts3User: ""
+  ts3Password: ""
+
+existingSecret:
+  enabled: false
+  name: ""
+  keys:
+    matrixAccessToken: MATRIX_ACCESS_TOKEN
+    ts3User: TS3_USER
+    ts3Password: TS3_PASSWORD
+
+persistence:
+  enabled: false
+  size: 1Gi
+  storageClassName: ""
+
+livenessProbe:
+  path: /healthz/live
+  initialDelaySeconds: 20
+  periodSeconds: 30
+readinessProbe:
+  path: /healthz/ready
+  initialDelaySeconds: 20
+  periodSeconds: 30
