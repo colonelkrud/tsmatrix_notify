@@ -7,7 +7,7 @@ import random
 import threading
 import time
 import traceback
-from typing import Callable
+from typing import Callable, Any
 
 from aiohttp.client_exceptions import ClientConnectorError
 
@@ -138,8 +138,7 @@ def make_ts3_thread_excepthook(
     log: logging.Logger,
     base_hook: Callable[[threading.ExceptHookArgs], None] | None = None,
 ) -> Callable[[threading.ExceptHookArgs], None]:
-    if base_hook is None:
-        base_hook = threading.excepthook
+    resolved_base_hook: Callable[[threading.ExceptHookArgs], Any] = base_hook or threading.excepthook
 
     def _hook(args: threading.ExceptHookArgs) -> None:
         try:
@@ -150,7 +149,7 @@ def make_ts3_thread_excepthook(
                 )
                 restart_event.set()
         finally:
-            base_hook(args)
+            resolved_base_hook(args)
 
     return _hook
 

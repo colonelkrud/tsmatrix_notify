@@ -8,6 +8,7 @@ import re
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
+from typing import Mapping
 
 
 class ConfigError(ValueError):
@@ -109,25 +110,25 @@ def log_config_summary(log: logging.Logger, cfg: "AppConfig") -> None:
     )
 
 
-def choose_paths(log: logging.Logger, env: dict[str, str] | None = None) -> tuple[str, str, Path, Path]:
-    env = env or os.environ
+def choose_paths(log: logging.Logger, env: Mapping[str, str] | None = None) -> tuple[str, str, Path, Path]:
+    env_map: Mapping[str, str] = os.environ if env is None else env
     is_windows = platform.system().lower().startswith("win")
 
     if is_windows:
-        local_app = env.get("LOCALAPPDATA") or tempfile.gettempdir()
+        local_app = env_map.get("LOCALAPPDATA") or tempfile.gettempdir()
         state_root = Path(local_app) / "TSMatrixNotify"
         data_root = Path(local_app) / "TSMatrixNotify"
         session_dir_default = state_root / "session"
         data_dir_default = data_root / "data"
     else:
         home = Path.home()
-        state_home = Path(env.get("XDG_STATE_HOME", home / ".local" / "state"))
-        data_home = Path(env.get("XDG_DATA_HOME", home / ".local" / "share"))
+        state_home = Path(env_map.get("XDG_STATE_HOME", home / ".local" / "state"))
+        data_home = Path(env_map.get("XDG_DATA_HOME", home / ".local" / "share"))
         session_dir_default = state_home / "tsmatrix_notify" / "session"
         data_dir_default = data_home / "tsmatrix_notify"
 
-    session_dir = Path(env.get("MATRIX_SESSION_DIR", str(session_dir_default)))
-    data_dir = Path(env.get("TSMATRIX_DATA_DIR", str(data_dir_default)))
+    session_dir = Path(env_map.get("MATRIX_SESSION_DIR", str(session_dir_default)))
+    data_dir = Path(env_map.get("TSMATRIX_DATA_DIR", str(data_dir_default)))
 
     def ensure_dir(p: Path, label: str) -> Path:
         try:
@@ -142,7 +143,7 @@ def choose_paths(log: logging.Logger, env: dict[str, str] | None = None) -> tupl
     session_dir = ensure_dir(session_dir, "session")
     data_dir = ensure_dir(data_dir, "data")
 
-    session_file = env.get("MATRIX_SESSION_FILE")
+    session_file = env_map.get("MATRIX_SESSION_FILE")
     if session_file:
         session_file = str(session_file)
     else:
@@ -152,32 +153,32 @@ def choose_paths(log: logging.Logger, env: dict[str, str] | None = None) -> tupl
     return str(session_dir), session_file, data_dir, stats_path
 
 
-def load_config(log: logging.Logger, env: dict[str, str] | None = None) -> AppConfig:
-    env = env or os.environ
-    session_dir, session_file, data_dir, stats_path = choose_paths(log, env=env)
+def load_config(log: logging.Logger, env: Mapping[str, str] | None = None) -> AppConfig:
+    env_map: Mapping[str, str] = os.environ if env is None else env
+    session_dir, session_file, data_dir, stats_path = choose_paths(log, env=env_map)
 
-    ts3_host = _require_non_empty("TS3_HOST", env.get("TS3_HOST", "127.0.0.1"))
-    ts3_port = _require_int("TS3_PORT", env.get("TS3_PORT", "10011"), minimum=1, maximum=65535)
-    ts3_user = _require_non_empty("TS3_USER", env.get("TS3_USER", ""))
-    ts3_password = _require_non_empty("TS3_PASSWORD", env.get("TS3_PASSWORD", ""))
-    ts3_vserver_id = _require_int("TS3_VSERVER_ID", env.get("TS3_VSERVER_ID", "1"), minimum=1)
+    ts3_host = _require_non_empty("TS3_HOST", env_map.get("TS3_HOST", "127.0.0.1"))
+    ts3_port = _require_int("TS3_PORT", env_map.get("TS3_PORT", "10011"), minimum=1, maximum=65535)
+    ts3_user = _require_non_empty("TS3_USER", env_map.get("TS3_USER", ""))
+    ts3_password = _require_non_empty("TS3_PASSWORD", env_map.get("TS3_PASSWORD", ""))
+    ts3_vserver_id = _require_int("TS3_VSERVER_ID", env_map.get("TS3_VSERVER_ID", "1"), minimum=1)
 
-    matrix_homeserver = _validate_matrix_homeserver(_require_non_empty("MATRIX_HOMESERVER", env.get("MATRIX_HOMESERVER", "")))
-    matrix_user_id = _require_non_empty("MATRIX_USER_ID", env.get("MATRIX_USER_ID", ""))
-    matrix_access_token = _require_non_empty("MATRIX_ACCESS_TOKEN", env.get("MATRIX_ACCESS_TOKEN", ""))
-    matrix_room_id = _require_non_empty("MATRIX_ROOM_ID", env.get("MATRIX_ROOM_ID", ""))
+    matrix_homeserver = _validate_matrix_homeserver(_require_non_empty("MATRIX_HOMESERVER", env_map.get("MATRIX_HOMESERVER", "")))
+    matrix_user_id = _require_non_empty("MATRIX_USER_ID", env_map.get("MATRIX_USER_ID", ""))
+    matrix_access_token = _require_non_empty("MATRIX_ACCESS_TOKEN", env_map.get("MATRIX_ACCESS_TOKEN", ""))
+    matrix_room_id = _require_non_empty("MATRIX_ROOM_ID", env_map.get("MATRIX_ROOM_ID", ""))
 
     if not MATRIX_USER_ID_RE.match(matrix_user_id):
         raise ConfigError("MATRIX_USER_ID must look like @user:server.")
     if not (MATRIX_ROOM_ID_RE.match(matrix_room_id) or MATRIX_ROOM_ALIAS_RE.match(matrix_room_id)):
         raise ConfigError("MATRIX_ROOM_ID must look like !room:server or #alias:server.")
 
-    bot_messages_file = env.get("BOT_MESSAGES_FILE", "bot_messages.json")
-    watchdog_timeout = _require_int("WATCHDOG_TIMEOUT", env.get("WATCHDOG_TIMEOUT", "1800"), minimum=1)
-    health_host = (env.get("HEALTHCHECK_HOST", "0.0.0.0") or "0.0.0.0").strip()
-    health_port = _require_int("HEALTHCHECK_PORT", env.get("HEALTHCHECK_PORT", "8080"), minimum=1, maximum=65535)
-    health_path_live = _normalize_health_path(env.get("HEALTHCHECK_PATH_LIVE", "/healthz/live"), "/healthz/live")
-    health_path_ready = _normalize_health_path(env.get("HEALTHCHECK_PATH_READY", "/healthz/ready"), "/healthz/ready")
+    bot_messages_file = env_map.get("BOT_MESSAGES_FILE", "bot_messages.json")
+    watchdog_timeout = _require_int("WATCHDOG_TIMEOUT", env_map.get("WATCHDOG_TIMEOUT", "1800"), minimum=1)
+    health_host = (env_map.get("HEALTHCHECK_HOST", "0.0.0.0") or "0.0.0.0").strip()
+    health_port = _require_int("HEALTHCHECK_PORT", env_map.get("HEALTHCHECK_PORT", "8080"), minimum=1, maximum=65535)
+    health_path_live = _normalize_health_path(env_map.get("HEALTHCHECK_PATH_LIVE", "/healthz/live"), "/healthz/live")
+    health_path_ready = _normalize_health_path(env_map.get("HEALTHCHECK_PATH_READY", "/healthz/ready"), "/healthz/ready")
 
     ts3 = TS3Config(host=ts3_host, port=ts3_port, user=ts3_user, password=ts3_password, vserver_id=ts3_vserver_id)
     matrix = MatrixConfig(homeserver=matrix_homeserver, user_id=matrix_user_id, access_token=matrix_access_token, room_id=matrix_room_id, session_file=session_file)

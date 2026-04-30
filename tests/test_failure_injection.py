@@ -37,7 +37,8 @@ def test_ts3_recv_crash_then_reconnect_resumes_delivery():
 def test_ts3_reconnect_backoff_resets_after_success():
     ts3 = FakeTS3Client()
     ts3.set_reconnect_failures(2)
-    restart = threading.Event(); restart.set()
+    restart = threading.Event()
+    restart.set()
     delays = []
     backoff = ExponentialBackoff(min_delay=2.0, factor=2.0, max_delay=20.0, jitter_ratio=0.0)
     sup = TS3ReconnectSupervisor(ts3, restart, logging.getLogger("test"), backoff=backoff, sleep=lambda d: delays.append(d))
