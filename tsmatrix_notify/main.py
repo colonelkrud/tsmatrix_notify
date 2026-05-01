@@ -56,7 +56,36 @@ def setup_logger(debug: bool, trace: bool):
     log = logging.getLogger("TSMatrixNotify")
     log.setLevel(lvl)
     handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)5s %(message)s"))
+    class _StructuredContextFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            for key in (
+                "correlation_id",
+                "event_type",
+                "ts3_event",
+                "ts3_client_id",
+                "ts3_client_name",
+                "matrix_room_id",
+                "restart_reason",
+                "sync_count",
+                "last_successful_sync_at",
+                "seconds_since_last_sync",
+                "send_attempt",
+                "error_type",
+            ):
+                if not hasattr(record, key):
+                    setattr(record, key, "-")
+            return True
+
+    handler.addFilter(_StructuredContextFilter())
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)5s %(message)s "
+            "corr=%(correlation_id)s event=%(event_type)s ts3_event=%(ts3_event)s "
+            "clid=%(ts3_client_id)s cname=%(ts3_client_name)s room=%(matrix_room_id)s "
+            "restart=%(restart_reason)s sync_count=%(sync_count)s last_sync=%(last_successful_sync_at)s "
+            "since_last=%(seconds_since_last_sync)s attempt=%(send_attempt)s err=%(error_type)s"
+        )
+    )
     log.addHandler(handler)
     if debug or trace:
         logging.getLogger("nio").setLevel(logging.DEBUG)
