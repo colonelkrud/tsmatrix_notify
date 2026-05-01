@@ -4,6 +4,7 @@ import logging
 import socket
 import time
 import threading
+import uuid
 from typing import Callable
 
 from ts3API.TS3Connection import TS3Connection, TS3QueryException
@@ -191,6 +192,7 @@ class TS3APIAdapter(TS3Port):
             if ts_event is None:
                 self._log.debug("Unhandled TS3 event: %s", type(ev).__name__)
                 return
+            ts_event = TSEvent(ts_event.kind, ts_event.data, correlation_id=str(uuid.uuid4()))
             self._handler(ts_event)
 
         conn.register_for_server_events(on_ts3_event)

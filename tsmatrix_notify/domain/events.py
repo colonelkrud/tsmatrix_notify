@@ -7,6 +7,7 @@ from dataclasses import dataclass
 class TSEvent:
     kind: str
     data: dict
+    correlation_id: str | None = None
 
 
 CLIENT_ENTERED = "client_entered"
