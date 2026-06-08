@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 import random
+import re
 import threading
 import time
 import traceback
@@ -140,14 +141,14 @@ class TS3ReconnectSupervisor:
         while self._restart_event.is_set():
             self._restart_event.clear()
             try:
-                self._log.info("TS3 reconnecting now")
+                self._log.info("ts3_reconnect_attempt")
                 self._ts3.reconnect()
                 self._backoff.reset()
-                self._log.info("TS3 reconnect successful")
+                self._log.info("ts3_reconnect_success")
                 return
             except Exception as exc:
                 delay = self._backoff.next_delay()
-                self._log.warning("TS3 reconnect failed (%r); retrying in %.1fs", exc, delay)
+                self._log.warning("ts3_reconnect_failure", extra={"retry_delay_s": delay, "error_type": type(exc).__name__})
                 self._sleep(delay)
                 self._restart_event.set()
 
@@ -174,16 +175,121 @@ def make_ts3_thread_excepthook(
     def _hook(args: threading.ExceptHookArgs) -> None:
         try:
             if _is_ts3_recv_thread(args):
+                if isinstance(args.exc_value, OSError) and getattr(args.exc_value, "errno", None) == 9:
+                    log.debug("TS3 recv thread exited during socket close; suppressing Bad file descriptor noise")
+                    return
                 log.error(
-                    "TS3 recv thread crashed, scheduling reconnect: %s",
-                    args.exc_value,
+                    "ts3_recv_thread_crashed",
+                    extra={"restart_reason": "ts3_recv_thread_crashed", "error_type": type(args.exc_value).__name__},
                 )
                 restart_event.set()
         finally:
-            resolved_base_hook(args)
+            if not (_is_ts3_recv_thread(args) and isinstance(args.exc_value, OSError) and getattr(args.exc_value, "errno", None) == 9):
+                resolved_base_hook(args)
 
     return _hook
 
 
 def install_ts3_thread_excepthook(restart_event: threading.Event, log: logging.Logger) -> None:
     threading.excepthook = make_ts3_thread_excepthook(restart_event, log)
+
+class SyncValidationFailure(RuntimeError):
+    """Signals repeated Matrix sync validation failures that require reconnect/re-login."""
+
+
+def _redact_text(value: str, *, max_len: int = 240) -> str:
+    text = str(value or "")
+    text = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s&]+", r"\1<redacted>", text)
+    replacements = ("access_token=", "access_token%3D", "token=", "password=", "passwd=")
+    lowered = text.lower()
+    for marker in replacements:
+        idx = lowered.find(marker)
+        while idx >= 0:
+            end = idx + len(marker)
+            stop = end
+            while stop < len(text) and text[stop] not in "& ?'\"\n\r\t":
+                stop += 1
+            text = text[:end] + "<redacted>" + text[stop:]
+            lowered = text.lower()
+            idx = lowered.find(marker, end + len("<redacted>"))
+    if len(text) > max_len:
+        return text[: max_len - 3] + "..."
+    return text
+
+
+class SyncValidationFailureTracker:
+    def __init__(
+        self,
+        log: logging.Logger,
+        *,
+        dedupe_window_s: float = 60.0,
+        reconnect_threshold: int = 3,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._log = log
+        self._dedupe_window_s = dedupe_window_s
+        self._reconnect_threshold = reconnect_threshold
+        self._clock = clock
+        self._last_log_at: float | None = None
+        self._last_signature: str | None = None
+        self._consecutive = 0
+        self.suppressed_count = 0
+
+    @property
+    def consecutive_failures(self) -> int:
+        return self._consecutive
+
+    def reset(self) -> None:
+        self._consecutive = 0
+        self.suppressed_count = 0
+        self._last_log_at = None
+        self._last_signature = None
+
+    def is_missing_next_batch(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "next_batch" in message and ("required property" in message or "required" in message or "validating response" in message)
+
+    def record(self, exc: Exception, *, endpoint: str = "/_matrix/client/v3/sync") -> bool:
+        self._consecutive += 1
+        status = getattr(exc, "status", None) or getattr(exc, "status_code", None)
+        errcode = getattr(exc, "errcode", None) or getattr(exc, "error_code", None)
+        body = getattr(exc, "body", None) or getattr(exc, "message", None) or str(exc)
+        summary = _redact_text(body)
+        signature = f"{endpoint}|{status}|{errcode}|{summary}"
+        now = self._clock()
+        should_log = (
+            self._last_log_at is None
+            or signature != self._last_signature
+            or now - self._last_log_at >= self._dedupe_window_s
+        )
+        if should_log:
+            self._log.warning(
+                "matrix_sync_validation_failure",
+                extra={
+                    "restart_reason": "matrix_sync_validation_failure",
+                    "matrix_endpoint": endpoint,
+                    "matrix_http_status": status or "unknown",
+                    "matrix_errcode": errcode or "unknown",
+                    "matrix_body_summary": summary,
+                    "sync_count": self._consecutive,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            self._log.debug("matrix_sync_validation_failure_body body_summary=%s", summary)
+            self._last_log_at = now
+            self._last_signature = signature
+            self.suppressed_count = 0
+        else:
+            self.suppressed_count += 1
+        if self._consecutive >= self._reconnect_threshold:
+            self._log.warning(
+                "matrix_reconnect_requested",
+                extra={
+                    "restart_reason": "matrix_sync_validation_failure",
+                    "matrix_endpoint": endpoint,
+                    "sync_count": self._consecutive,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return True
+        return False

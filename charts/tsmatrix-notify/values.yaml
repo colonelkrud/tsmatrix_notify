@@ -41,6 +41,11 @@ config:
   matrixUserId: ""
   matrixRoomId: ""
   watchdogTimeout: 1800
+  matrixSendQueueMaxSize: 100
+  matrixSendRetryMaxAttempts: 5
+  matrixSendRetryMinBackoffSeconds: 1.0
+  matrixSendRetryMaxBackoffSeconds: 30.0
+  matrixSendRetryJitterRatio: 0.25
   healthPort: 8080
 
 secret:

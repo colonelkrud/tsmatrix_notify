@@ -38,6 +38,11 @@ Entrypoint command is `python tsmatrix_notify.py` and accepts `--debug`, `--trac
 | `WATCHDOG_TIMEOUT` | `1800` | Timeout used by `--watchdog` |
 | `MATRIX_SESSION_DIR` | OS-dependent | Matrix session directory |
 | `MATRIX_SESSION_FILE` | `<session_dir>/matrix_session.json` | Matrix session file path |
+| `MATRIX_SEND_QUEUE_MAX_SIZE` | `100` | Bounded outgoing Matrix notification queue depth. When full, the newest notification is dropped and `matrix_send_queue_overflow_drop` is logged with `drop_policy=drop_newest`. |
+| `MATRIX_SEND_RETRY_MAX_ATTEMPTS` | `5` | Matrix send attempts per queued notification before logging `matrix_send_failure`. |
+| `MATRIX_SEND_RETRY_MIN_BACKOFF_SECONDS` | `1.0` | Initial retry backoff for Matrix send failures. |
+| `MATRIX_SEND_RETRY_MAX_BACKOFF_SECONDS` | `30.0` | Maximum retry backoff for Matrix send failures. |
+| `MATRIX_SEND_RETRY_JITTER_RATIO` | `0.25` | Fractional random jitter added to Matrix send retry delays. |
 | `TSMATRIX_DATA_DIR` | OS-dependent | Runtime data dir (`bot_reviews_stats.json`) |
 | `HEALTHCHECK_HOST` | `0.0.0.0` | Health HTTP bind host |
 | `HEALTHCHECK_PORT` | `8080` | Health HTTP bind port |
@@ -123,10 +128,12 @@ helm pull oci://ghcr.io/colonelkrud/charts/tsmatrix-notify --version <chart-vers
 
 ## Resiliency and failure handling
 
-- **TS3 reconnect supervisor** monitors the TS3 receive loop and treats recv-thread exits as a fault condition. On failure it emits `TS3 reconnecting…` logs and retries with bounded backoff until the adapter is healthy again.
+- **TS3 reconnect supervisor** monitors the TS3 receive loop and treats recv-thread exits as a fault condition. On failure it emits `ts3_reconnect_attempt`, `ts3_reconnect_success`, and `ts3_reconnect_failure` logs and retries with bounded exponential backoff until the adapter is healthy again. Socket-close `Bad file descriptor` noise from TS3 receiver shutdown is suppressed during close.
+- **Matrix outgoing send queue** buffers TS3 event notifications in FIFO order where practical. The queue is bounded by `MATRIX_SEND_QUEUE_MAX_SIZE` to prevent unbounded memory growth. Overflow policy is **drop newest**: the message that cannot be enqueued is not sent, and `matrix_send_queue_overflow_drop` is logged with the correlation ID, queue size, max size, and drop policy. Short Matrix send outages are retried from the queue using exponential backoff plus jitter before `matrix_send_failure` is emitted.
 - **Matrix resilience** starts with a homeserver `/versions` probe (`versions probe` in logs) before long-running sync usage. Transient failures (timeouts, temporary transport errors, 5xx responses) are retried; non-transient failures (invalid config/auth/permanent protocol errors) fail fast so operators can intervene.
+- **Matrix sync validation hardening** detects repeated validation failures such as `next_batch` missing from sync responses. The app logs `matrix_sync_validation_failure` with the sync endpoint, HTTP status/error code when available, a redacted body summary, and deduplicates identical failures per window so logs do not flood. Repeated failures mark readiness false and restart the Matrix loop, causing reconnect/re-login with supervisor backoff.
 - **Sync-rate watchdog** (optional `--watchdog`) tracks the last successful Matrix sync timestamp and per-interval sync counts. When no syncs occur across the configured interval threshold, it emits `matrix_sync_stalled` with `last_successful_sync_at`, `seconds_since_last_sync`, `sync_count`, and `configured_threshold`, then restarts the Matrix loop.
-- **Structured restart reasons** are emitted as stable log messages/fields: `matrix_sync_stalled`, `matrix_sync_exception`, `matrix_send_failure`, and `shutdown_requested`.
+- **Structured restart reasons** are emitted as stable log messages/fields: `matrix_sync_stalled`, `matrix_sync_validation_failure`, `matrix_sync_exception`, `matrix_send_retry`, `matrix_send_failure`, `matrix_send_queue_overflow_drop`, and `shutdown_requested`.
 - **Correlation IDs** are generated for each TS3 notify and carried through TS3 receive, domain translation, dispatch decision, Matrix send attempt, and Matrix send success/failure logs via `correlation_id`.
 - **Failure-injection test coverage** validates these behaviors using deterministic fakes from PR #21. Run with:
 

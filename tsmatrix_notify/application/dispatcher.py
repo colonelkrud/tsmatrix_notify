@@ -19,7 +19,7 @@ def send_actions(matrix: MatrixPort, actions: list[MatrixAction], log: logging.L
             },
         )
         try:
-            matrix.send_text(action.room_id, action.text, action.clid)
+            matrix.send_text(action.room_id, action.text, action.clid, correlation_id=action.correlation_id, event_type=action.event_type)
             log.info(
                 "matrix_send_success",
                 extra={
@@ -46,6 +46,6 @@ def send_actions(matrix: MatrixPort, actions: list[MatrixAction], log: logging.L
 
 def send_actions_if_ready(matrix: MatrixPort, actions: list[MatrixAction], log: logging.Logger) -> None:
     if not matrix.is_ready():
-        log.debug("Matrix not ready; skipping %d actions", len(actions))
+        log.warning("Matrix not ready; matrix_send_not_ready_drop", extra={"queue_size": len(actions), "error_type": "MatrixNotReady"})
         return
     send_actions(matrix, actions, log)

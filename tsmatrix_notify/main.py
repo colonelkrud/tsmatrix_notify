@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 import simplematrixbotlib as botlib
 from nio import SyncResponse
 
-from tsmatrix_notify.adapters.matrix_simplematrixbotlib import MatrixBotAdapter
+from tsmatrix_notify.adapters.matrix_simplematrixbotlib import MatrixBotAdapter, MatrixSendQueueConfig
 from tsmatrix_notify.adapters.persistence_fs import FilePersistence
 from tsmatrix_notify.adapters.ts3_ts3api import TS3APIAdapter
 from tsmatrix_notify.config import ConfigError, load_config
@@ -30,6 +30,7 @@ from tsmatrix_notify.application.supervisors import (
     MatrixReconnectSupervisor,
     SyncWatchdogState,
     TS3ReconnectSupervisor,
+    SyncValidationFailureTracker,
     install_ts3_thread_excepthook,
 )
 
@@ -71,6 +72,14 @@ def setup_logger(debug: bool, trace: bool):
                 "seconds_since_last_sync",
                 "send_attempt",
                 "error_type",
+                "queue_size",
+                "queue_max_size",
+                "drop_policy",
+                "retry_delay_s",
+                "matrix_endpoint",
+                "matrix_http_status",
+                "matrix_errcode",
+                "matrix_body_summary",
             ):
                 if not hasattr(record, key):
                     setattr(record, key, "-")
@@ -83,7 +92,7 @@ def setup_logger(debug: bool, trace: bool):
             "corr=%(correlation_id)s event=%(event_type)s ts3_event=%(ts3_event)s "
             "clid=%(ts3_client_id)s cname=%(ts3_client_name)s room=%(matrix_room_id)s "
             "restart=%(restart_reason)s sync_count=%(sync_count)s last_sync=%(last_successful_sync_at)s "
-            "since_last=%(seconds_since_last_sync)s attempt=%(send_attempt)s err=%(error_type)s"
+            "since_last=%(seconds_since_last_sync)s attempt=%(send_attempt)s q=%(queue_size)s/%(queue_max_size)s retry_delay=%(retry_delay_s)s endpoint=%(matrix_endpoint)s http=%(matrix_http_status)s errcode=%(matrix_errcode)s body=%(matrix_body_summary)s err=%(error_type)s"
         )
     )
     log.addHandler(handler)
@@ -93,6 +102,28 @@ def setup_logger(debug: bool, trace: bool):
         logging.getLogger("aiohttp").setLevel(logging.WARNING)
     return log
 
+
+
+class _SyncValidationLogFilter(logging.Filter):
+    def __init__(self, tracker: SyncValidationFailureTracker, loop: asyncio.AbstractEventLoop, bot_task_getter, health_state: HealthState):
+        super().__init__()
+        self._tracker = tracker
+        self._loop = loop
+        self._bot_task_getter = bot_task_getter
+        self._health_state = health_state
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+            exc = RuntimeError(message)
+            if self._tracker.is_missing_next_batch(exc) and self._tracker.record(exc):
+                self._health_state.set_ready(False, "matrix sync validation failure; reconnecting")
+                bot_task = self._bot_task_getter()
+                if isinstance(bot_task, asyncio.Task) and not bot_task.done():
+                    self._loop.call_soon_threadsafe(bot_task.cancel)
+        except Exception:
+            return True
+        return True
 
 def parse_args():
     parser = argparse.ArgumentParser("TSMatrixNotify bridge")
@@ -251,6 +282,7 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
     state = AppState()
     sync_watchdog = SyncWatchdogState(stall_threshold_s=60)
     matrix_supervisor = MatrixReconnectSupervisor(log)
+    sync_validation_tracker = SyncValidationFailureTracker(log)
     restart_delay: float | None = None
 
     while not stop_event.is_set():
@@ -264,6 +296,8 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
         bot = None
         ts3 = None
         ts3_supervisor = None
+        matrix = None
+        sync_validation_log_filter = None
         normalized_homeserver = None
 
         try:
@@ -283,7 +317,14 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
             room_id = config.matrix.room_id
 
             bot = connect_matrix(creds, log)
-            matrix = MatrixBotAdapter(bot, main_loop, log)
+            send_queue_config = MatrixSendQueueConfig(
+                max_size=config.matrix.send.queue_max_size,
+                retry_max_attempts=config.matrix.send.retry_max_attempts,
+                retry_min_backoff_s=config.matrix.send.retry_min_backoff_s,
+                retry_max_backoff_s=config.matrix.send.retry_max_backoff_s,
+                retry_jitter_ratio=config.matrix.send.retry_jitter_ratio,
+            )
+            matrix = MatrixBotAdapter(bot, main_loop, log, queue_config=send_queue_config)
             ts3 = TS3APIAdapter(
                 config.ts3.host,
                 config.ts3.port,
@@ -297,6 +338,7 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
 
             def _on_sync_response(resp: SyncResponse):
                 sync_watchdog.mark_sync_success(time.time())
+                sync_validation_tracker.reset()
 
             async def _matrix_http_versions(hs: str, timeout_s: int = 6):
                 url = hs.rstrip("/") + "/_matrix/client/versions"
@@ -594,6 +636,10 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
 
             bot_task = main_loop.create_task(run_bot_main())
             runtime["bot_task"] = bot_task
+            sync_validation_log_filter = _SyncValidationLogFilter(
+                sync_validation_tracker, main_loop, lambda: runtime.get("bot_task"), health_state
+            )
+            logging.getLogger("nio").addFilter(sync_validation_log_filter)
 
             async def _sync_rate_watchdog():
                 try:
@@ -636,7 +682,15 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
                 pass
         except Exception as exc:
             et = type(exc).__name__
-            if isinstance(exc, asyncio.CancelledError):
+            if sync_validation_tracker.is_missing_next_batch(exc):
+                should_reconnect = sync_validation_tracker.record(exc)
+                if should_reconnect:
+                    health_state.set_ready(False, "matrix sync validation failure; reconnecting")
+                    restart_delay = matrix_supervisor.next_delay()
+                    log.warning("matrix_sync_exception", extra={"restart_reason": "matrix_sync_validation_failure", "error_type": et})
+                else:
+                    restart_delay = matrix_supervisor.next_delay()
+            elif isinstance(exc, asyncio.CancelledError):
                 log.info("Event loop cancelled; performing graceful shutdown.")
                 try:
                     main_loop.run_until_complete(shutdown_bot(bot, log))
@@ -667,6 +721,17 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
                     pass
 
         finally:
+            try:
+                if sync_validation_log_filter is not None:
+                    logging.getLogger("nio").removeFilter(sync_validation_log_filter)
+            except Exception:
+                pass
+            if matrix is not None:
+                try:
+                    main_loop.run_until_complete(matrix.close(drain=True))
+                except Exception:
+                    log.exception("Error draining Matrix send queue during shutdown")
+
             async def _cancel_pending():
                 tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
                 for task in tasks:

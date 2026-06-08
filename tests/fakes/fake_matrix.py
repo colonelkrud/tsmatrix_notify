@@ -19,7 +19,7 @@ class FakeMatrix:
         self.sync_callbacks = []
         self.sync_emitted = 0
 
-    def send_text(self, room_id: str, text: str, clid=None):
+    def send_text(self, room_id: str, text: str, clid=None, *, correlation_id=None, event_type=None):
         if self.fail:
             raise RuntimeError("send failed")
         if self.send_failures:
