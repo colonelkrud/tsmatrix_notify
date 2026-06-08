@@ -147,7 +147,7 @@ python -m pytest -q
 
 1. Confirm configuration validation passes (homeserver URL, user ID, room ID, secrets).
 2. Search logs for `TS3 reconnecting…`, `versions probe`, `matrix_sync_stalled`, `matrix_sync_exception`, and `matrix_send_failure` to identify which supervisor path is active.
-3. Trace individual TS3→Matrix deliveries by filtering logs on `correlation_id=<id>` and checking `ts3_notify_received` → `dispatch_decision` → `matrix_send_attempt` / `matrix_send_success` or `matrix_send_failure`.
+3. Trace individual TS3→Matrix deliveries by filtering logs on `correlation_id=<id>` and checking `ts3_notify_received` → `dispatch_decision` → `matrix_send_enqueue_attempt` / `matrix_send_enqueued`, then worker-side `matrix_send_attempt` / `matrix_send_success` or `matrix_send_failure`.
 4. If reconnect loops persist, verify TS3 query credentials/network reachability and Matrix token validity.
 5. Re-run `python -m pytest -q` locally to verify regressions are not introduced before redeploying.
 

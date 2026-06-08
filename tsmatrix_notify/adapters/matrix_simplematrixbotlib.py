@@ -53,7 +53,6 @@ class MatrixBotAdapter(MatrixPort):
         self._sleep = sleep
         self._random_provider = random_provider
         self._closed = False
-        self._ensure_worker()
 
     def send_text(
         self,
@@ -64,19 +63,51 @@ class MatrixBotAdapter(MatrixPort):
         correlation_id: str | None = None,
         event_type: str | None = None,
     ) -> None:
+        msg = self._make_message(room_id, text, clid, correlation_id, event_type)
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is self._loop:
+            self._enqueue_nowait(msg)
+            return
+        fut = asyncio.run_coroutine_threadsafe(self._enqueue(msg), self._loop)
+        fut.result(timeout=self._queue_config.enqueue_timeout_s)
+
+    async def send_text_async(
+        self,
+        room_id: str,
+        text: str,
+        clid: str | None = None,
+        *,
+        correlation_id: str | None = None,
+        event_type: str | None = None,
+    ) -> None:
+        msg = self._make_message(room_id, text, clid, correlation_id, event_type)
+        await self._enqueue(msg)
+
+    def _make_message(
+        self,
+        room_id: str,
+        text: str,
+        clid: str | None,
+        correlation_id: str | None,
+        event_type: str | None,
+    ) -> QueuedMatrixMessage:
         if self._closed:
             raise RuntimeError("Matrix send queue is closed")
-        msg = QueuedMatrixMessage(
+        return QueuedMatrixMessage(
             room_id=room_id,
             text=text,
             clid=clid,
             correlation_id=correlation_id or "-",
             event_type=event_type or "matrix_message",
         )
-        fut = asyncio.run_coroutine_threadsafe(self._enqueue(msg), self._loop)
-        fut.result(timeout=self._queue_config.enqueue_timeout_s)
 
     async def _enqueue(self, msg: QueuedMatrixMessage) -> None:
+        self._enqueue_nowait(msg)
+
+    def _enqueue_nowait(self, msg: QueuedMatrixMessage) -> None:
         self._ensure_worker()
         try:
             self._queue.put_nowait(msg)

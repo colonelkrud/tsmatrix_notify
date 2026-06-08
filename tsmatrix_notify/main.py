@@ -105,18 +105,27 @@ def setup_logger(debug: bool, trace: bool):
 
 
 class _SyncValidationLogFilter(logging.Filter):
-    def __init__(self, tracker: SyncValidationFailureTracker, loop: asyncio.AbstractEventLoop, bot_task_getter, health_state: HealthState):
+    def __init__(
+        self,
+        tracker: SyncValidationFailureTracker,
+        loop: asyncio.AbstractEventLoop,
+        bot_task_getter,
+        health_state: HealthState,
+        restart_requested: threading.Event,
+    ):
         super().__init__()
         self._tracker = tracker
         self._loop = loop
         self._bot_task_getter = bot_task_getter
         self._health_state = health_state
+        self._restart_requested = restart_requested
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             message = record.getMessage()
             exc = RuntimeError(message)
             if self._tracker.is_missing_next_batch(exc) and self._tracker.record(exc):
+                self._restart_requested.set()
                 self._health_state.set_ready(False, "matrix sync validation failure; reconnecting")
                 bot_task = self._bot_task_getter()
                 if isinstance(bot_task, asyncio.Task) and not bot_task.done():
@@ -124,6 +133,35 @@ class _SyncValidationLogFilter(logging.Filter):
         except Exception:
             return True
         return True
+
+
+def _run_matrix_bot_task(
+    main_loop: asyncio.AbstractEventLoop,
+    bot_task: asyncio.Task,
+    *,
+    use_watchdog: bool,
+    watchdog_timeout: int,
+    sync_validation_restart_requested: threading.Event,
+    matrix_supervisor: MatrixReconnectSupervisor,
+    health_state: HealthState,
+    log: logging.Logger,
+) -> float | None:
+    try:
+        if use_watchdog:
+            main_loop.run_until_complete(asyncio.wait_for(bot_task, timeout=watchdog_timeout))
+        else:
+            main_loop.run_until_complete(bot_task)
+    except asyncio.CancelledError:
+        if sync_validation_restart_requested.is_set():
+            health_state.set_ready(False, "matrix sync validation failure; reconnecting")
+            delay = matrix_supervisor.next_delay()
+            log.warning(
+                "matrix_sync_exception",
+                extra={"restart_reason": "matrix_sync_validation_failure", "error_type": "CancelledError"},
+            )
+            return delay
+        raise
+    return None
 
 def parse_args():
     parser = argparse.ArgumentParser("TSMatrixNotify bridge")
@@ -298,6 +336,7 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
         ts3_supervisor = None
         matrix = None
         sync_validation_log_filter = None
+        sync_validation_restart_requested = threading.Event()
         normalized_homeserver = None
 
         try:
@@ -637,7 +676,7 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
             bot_task = main_loop.create_task(run_bot_main())
             runtime["bot_task"] = bot_task
             sync_validation_log_filter = _SyncValidationLogFilter(
-                sync_validation_tracker, main_loop, lambda: runtime.get("bot_task"), health_state
+                sync_validation_tracker, main_loop, lambda: runtime.get("bot_task"), health_state, sync_validation_restart_requested
             )
             logging.getLogger("nio").addFilter(sync_validation_log_filter)
 
@@ -658,14 +697,19 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
 
             main_loop.create_task(_sync_rate_watchdog())
 
-            if args.watchdog:
-                main_loop.run_until_complete(
-                    asyncio.wait_for(bot_task, timeout=config.watchdog_timeout)
-                )
-            else:
-                main_loop.run_until_complete(bot_task)
-
-            if not startup_once.is_set():
+            handled_restart_delay = _run_matrix_bot_task(
+                main_loop,
+                bot_task,
+                use_watchdog=args.watchdog,
+                watchdog_timeout=config.watchdog_timeout,
+                sync_validation_restart_requested=sync_validation_restart_requested,
+                matrix_supervisor=matrix_supervisor,
+                health_state=health_state,
+                log=log,
+            )
+            if handled_restart_delay is not None:
+                restart_delay = handled_restart_delay
+            elif not startup_once.is_set():
                 health_state.set_ready(False, "startup incomplete; restarting")
                 log.warning("Matrix main returned but no on_startup observed; restarting.")
             else:
@@ -673,6 +717,20 @@ def run() -> int:  # pragma: no cover - exercised via integration/runtime execut
                 log.info("Matrix main returned; restarting bridge.")
             main_loop.run_until_complete(shutdown_bot(bot, log))
 
+        except asyncio.CancelledError:
+            if stop_event.is_set():
+                log.info("Event loop cancelled during operator shutdown; performing graceful shutdown.")
+                try:
+                    main_loop.run_until_complete(shutdown_bot(bot, log))
+                except Exception:
+                    pass
+                break
+            log.info("Event loop cancelled; restarting Matrix loop with backoff.")
+            restart_delay = matrix_supervisor.next_delay()
+            try:
+                main_loop.run_until_complete(shutdown_bot(bot, log))
+            except Exception:
+                pass
         except ConfigError as exc:
             log.warning("matrix_sync_exception", extra={"restart_reason": "matrix_sync_exception", "error_type": type(exc).__name__})
             restart_delay = matrix_supervisor.handle_error(exc)

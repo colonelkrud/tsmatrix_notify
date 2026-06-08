@@ -47,13 +47,56 @@ def _wait_for(predicate, timeout=2.0):
     raise AssertionError("condition not reached")
 
 
-def test_send_text_success():
+def test_thread_side_send_text_enqueues_successfully():
     bot = DummyBot()
     with LoopThread() as loop:
         adapter = MatrixBotAdapter(bot, loop, logging.getLogger("test"))
         adapter.send_text("!r", "hello", clid="1", correlation_id="c1", event_type="joined")
         _wait_for(lambda: bot.api.calls == [("!r", "hello")])
         asyncio.run_coroutine_threadsafe(adapter.close(), loop).result(timeout=2)
+
+
+def test_same_event_loop_send_text_does_not_deadlock():
+    async def scenario():
+        bot = DummyBot()
+        loop = asyncio.get_running_loop()
+        adapter = MatrixBotAdapter(bot, loop, logging.getLogger("test"))
+        adapter.send_text("!r", "hello", clid="1", correlation_id="same-loop")
+        await asyncio.wait_for(adapter._queue.join(), timeout=1)
+        assert bot.api.calls == [("!r", "hello")]
+        await adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_same_event_loop_queue_overflow_raises_and_logs(caplog):
+    async def scenario():
+        bot = DummyBot()
+        blocker = asyncio.Event()
+
+        async def blocked_sleep(_delay):
+            await blocker.wait()
+
+        bot.api.failures = [RuntimeError("first blocks retries")]
+        loop = asyncio.get_running_loop()
+        adapter = MatrixBotAdapter(
+            bot,
+            loop,
+            logging.getLogger("test"),
+            MatrixSendQueueConfig(max_size=1, retry_max_attempts=2, retry_min_backoff_s=30, retry_max_backoff_s=30),
+            sleep=blocked_sleep,
+        )
+        with caplog.at_level(logging.WARNING):
+            adapter.send_text("!r", "first")
+            await asyncio.sleep(0)
+            adapter.send_text("!r", "second")
+            with pytest.raises(MatrixSendQueueFull):
+                adapter.send_text("!r", "third")
+        assert "matrix_send_queue_overflow_drop" in caplog.text
+        blocker.set()
+        await adapter.close()
+
+    asyncio.run(scenario())
 
 
 def test_send_text_retries_with_backoff(caplog):

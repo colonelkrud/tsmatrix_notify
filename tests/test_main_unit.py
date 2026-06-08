@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -83,7 +84,8 @@ def test_sync_validation_log_filter_cancels_bot_task_after_threshold(caplog):
         task = loop.create_task(sleeper())
         tracker = main.SyncValidationFailureTracker(logging.getLogger("test"), reconnect_threshold=1)
         health = main.HealthState(live=True, ready=True, status="ready")
-        filt = main._SyncValidationLogFilter(tracker, loop, lambda: task, health)
+        restart_requested = threading.Event()
+        filt = main._SyncValidationLogFilter(tracker, loop, lambda: task, health, restart_requested)
         record = logging.LogRecord(
             "nio", logging.ERROR, __file__, 1,
             "Error validating response: 'next_batch' is a required property", (), None,
@@ -92,8 +94,72 @@ def test_sync_validation_log_filter_cancels_bot_task_after_threshold(caplog):
             assert filt.filter(record) is True
         loop.run_until_complete(asyncio.sleep(0))
         assert task.cancelled() is True
+        assert restart_requested.is_set() is True
         assert health.ready is False
         assert "matrix_sync_validation_failure" in caplog.text
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+def test_sync_validation_cancel_uses_restart_backoff_instead_of_raising(caplog):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        async def sleeper():
+            await asyncio.sleep(10)
+
+        task = loop.create_task(sleeper())
+        task.cancel()
+        restart_requested = threading.Event()
+        restart_requested.set()
+        health = main.HealthState(live=True, ready=True, status="ready")
+        supervisor = main.MatrixReconnectSupervisor(logging.getLogger("test"))
+
+        with caplog.at_level(logging.WARNING):
+            delay = main._run_matrix_bot_task(
+                loop,
+                task,
+                use_watchdog=False,
+                watchdog_timeout=1,
+                sync_validation_restart_requested=restart_requested,
+                matrix_supervisor=supervisor,
+                health_state=health,
+                log=logging.getLogger("test"),
+            )
+
+        assert delay is not None
+        assert delay > 0
+        assert health.ready is False
+        assert "matrix_sync_exception" in caplog.text
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+def test_operator_cancelled_error_still_raises_without_sync_restart():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        async def sleeper():
+            await asyncio.sleep(10)
+
+        task = loop.create_task(sleeper())
+        task.cancel()
+        health = main.HealthState(live=True, ready=True, status="ready")
+        supervisor = main.MatrixReconnectSupervisor(logging.getLogger("test"))
+
+        with pytest.raises(asyncio.CancelledError):
+            main._run_matrix_bot_task(
+                loop,
+                task,
+                use_watchdog=False,
+                watchdog_timeout=1,
+                sync_validation_restart_requested=threading.Event(),
+                matrix_supervisor=supervisor,
+                health_state=health,
+                log=logging.getLogger("test"),
+            )
     finally:
         loop.close()
         asyncio.set_event_loop(None)
