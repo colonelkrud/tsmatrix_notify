@@ -13,4 +13,9 @@ data:
   MATRIX_USER_ID: {{ .Values.config.matrixUserId | quote }}
   MATRIX_ROOM_ID: {{ .Values.config.matrixRoomId | quote }}
   WATCHDOG_TIMEOUT: {{ .Values.config.watchdogTimeout | quote }}
+  MATRIX_SEND_QUEUE_MAX_SIZE: {{ .Values.config.matrixSendQueueMaxSize | quote }}
+  MATRIX_SEND_RETRY_MAX_ATTEMPTS: {{ .Values.config.matrixSendRetryMaxAttempts | quote }}
+  MATRIX_SEND_RETRY_MIN_BACKOFF_SECONDS: {{ .Values.config.matrixSendRetryMinBackoffSeconds | quote }}
+  MATRIX_SEND_RETRY_MAX_BACKOFF_SECONDS: {{ .Values.config.matrixSendRetryMaxBackoffSeconds | quote }}
+  MATRIX_SEND_RETRY_JITTER_RATIO: {{ .Values.config.matrixSendRetryJitterRatio | quote }}
   HEALTHCHECK_PORT: {{ .Values.config.healthPort | quote }}

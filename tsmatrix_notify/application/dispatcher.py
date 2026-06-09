@@ -9,7 +9,7 @@ from tsmatrix_notify.ports.matrix_port import MatrixPort
 def send_actions(matrix: MatrixPort, actions: list[MatrixAction], log: logging.Logger) -> None:
     for index, action in enumerate(actions, start=1):
         log.info(
-            "matrix_send_attempt",
+            "matrix_send_enqueue_attempt",
             extra={
                 "correlation_id": action.correlation_id,
                 "event_type": action.event_type,
@@ -19,9 +19,9 @@ def send_actions(matrix: MatrixPort, actions: list[MatrixAction], log: logging.L
             },
         )
         try:
-            matrix.send_text(action.room_id, action.text, action.clid)
+            matrix.send_text(action.room_id, action.text, action.clid, correlation_id=action.correlation_id, event_type=action.event_type)
             log.info(
-                "matrix_send_success",
+                "matrix_send_enqueued",
                 extra={
                     "correlation_id": action.correlation_id,
                     "event_type": action.event_type,
@@ -46,6 +46,6 @@ def send_actions(matrix: MatrixPort, actions: list[MatrixAction], log: logging.L
 
 def send_actions_if_ready(matrix: MatrixPort, actions: list[MatrixAction], log: logging.Logger) -> None:
     if not matrix.is_ready():
-        log.debug("Matrix not ready; skipping %d actions", len(actions))
+        log.warning("Matrix not ready; matrix_send_not_ready_drop", extra={"queue_size": len(actions), "error_type": "MatrixNotReady"})
         return
     send_actions(matrix, actions, log)

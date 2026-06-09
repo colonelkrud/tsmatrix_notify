@@ -1,28 +1,22 @@
 import asyncio
 import logging
+import threading
+import time
 
-from tsmatrix_notify.adapters.matrix_simplematrixbotlib import MatrixBotAdapter
+import pytest
 
-
-class DummyFuture:
-    def __init__(self, error=None):
-        self._error = error
-
-    def add_done_callback(self, cb):
-        cb(self)
-
-    def result(self):
-        if self._error:
-            raise self._error
-        return None
+from tsmatrix_notify.adapters.matrix_simplematrixbotlib import MatrixBotAdapter, MatrixSendQueueConfig, MatrixSendQueueFull
 
 
 class DummyAPI:
     def __init__(self):
         self.calls = []
+        self.failures = []
 
     async def send_text_message(self, room_id, text):
         self.calls.append((room_id, text))
+        if self.failures:
+            raise self.failures.pop(0)
 
 
 class DummyBot:
@@ -31,23 +25,129 @@ class DummyBot:
         self.async_client = type("C", (), {"access_token": "tok"})()
 
 
-def test_send_text_success(monkeypatch):
-    bot = DummyBot()
-    adapter = MatrixBotAdapter(bot, asyncio.new_event_loop(), logging.getLogger("test"))
-    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", lambda coro, _loop: (asyncio.run(coro), DummyFuture())[1])
-    adapter.send_text("!r", "hello", clid="1")
-    assert bot.api.calls == [("!r", "hello")]
+class LoopThread:
+    def __enter__(self):
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.loop.run_forever)
+        self.thread.start()
+        return self.loop
+
+    def __exit__(self, *_exc):
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(timeout=2)
+        self.loop.close()
 
 
-def test_send_text_error_callback(monkeypatch, caplog):
+def _wait_for(predicate, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("condition not reached")
+
+
+def test_thread_side_send_text_enqueues_successfully():
     bot = DummyBot()
-    adapter = MatrixBotAdapter(bot, asyncio.new_event_loop(), logging.getLogger("test"))
-    def _fail(coro, _loop):
-        coro.close()
-        return DummyFuture(error=RuntimeError("send failed"))
-    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _fail)
-    adapter.send_text("!r", "hello")
-    assert "Failed to send Matrix message" in caplog.text
+    with LoopThread() as loop:
+        adapter = MatrixBotAdapter(bot, loop, logging.getLogger("test"))
+        adapter.send_text("!r", "hello", clid="1", correlation_id="c1", event_type="joined")
+        _wait_for(lambda: bot.api.calls == [("!r", "hello")])
+        asyncio.run_coroutine_threadsafe(adapter.close(), loop).result(timeout=2)
+
+
+def test_same_event_loop_send_text_does_not_deadlock():
+    async def scenario():
+        bot = DummyBot()
+        loop = asyncio.get_running_loop()
+        adapter = MatrixBotAdapter(bot, loop, logging.getLogger("test"))
+        adapter.send_text("!r", "hello", clid="1", correlation_id="same-loop")
+        await asyncio.wait_for(adapter._queue.join(), timeout=1)
+        assert bot.api.calls == [("!r", "hello")]
+        await adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_same_event_loop_queue_overflow_raises_and_logs(caplog):
+    async def scenario():
+        bot = DummyBot()
+        blocker = asyncio.Event()
+
+        async def blocked_sleep(_delay):
+            await blocker.wait()
+
+        bot.api.failures = [RuntimeError("first blocks retries")]
+        loop = asyncio.get_running_loop()
+        adapter = MatrixBotAdapter(
+            bot,
+            loop,
+            logging.getLogger("test"),
+            MatrixSendQueueConfig(max_size=1, retry_max_attempts=2, retry_min_backoff_s=30, retry_max_backoff_s=30),
+            sleep=blocked_sleep,
+        )
+        with caplog.at_level(logging.WARNING):
+            adapter.send_text("!r", "first")
+            await asyncio.sleep(0)
+            adapter.send_text("!r", "second")
+            with pytest.raises(MatrixSendQueueFull):
+                adapter.send_text("!r", "third")
+        assert "matrix_send_queue_overflow_drop" in caplog.text
+        blocker.set()
+        await adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_send_text_retries_with_backoff(caplog):
+    bot = DummyBot()
+    bot.api.failures = [RuntimeError("send failed")]
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    with LoopThread() as loop:
+        adapter = MatrixBotAdapter(
+            bot,
+            loop,
+            logging.getLogger("test"),
+            MatrixSendQueueConfig(max_size=10, retry_max_attempts=2, retry_min_backoff_s=1, retry_max_backoff_s=10, retry_jitter_ratio=0),
+            sleep=fake_sleep,
+            random_provider=lambda: 0.0,
+        )
+        with caplog.at_level(logging.WARNING):
+            adapter.send_text("!r", "hello", correlation_id="c1")
+            _wait_for(lambda: len(bot.api.calls) == 2)
+        assert sleeps == [1.0]
+        assert "matrix_send_retry" in caplog.text
+        asyncio.run_coroutine_threadsafe(adapter.close(), loop).result(timeout=2)
+
+
+def test_bounded_queue_overflow_drops_newest(caplog):
+    bot = DummyBot()
+    blocker = asyncio.Event()
+
+    async def blocked_sleep(_delay):
+        await blocker.wait()
+
+    bot.api.failures = [RuntimeError("first blocks retries")]
+    with LoopThread() as loop:
+        adapter = MatrixBotAdapter(
+            bot,
+            loop,
+            logging.getLogger("test"),
+            MatrixSendQueueConfig(max_size=1, retry_max_attempts=2, retry_min_backoff_s=30, retry_max_backoff_s=30),
+            sleep=blocked_sleep,
+        )
+        with caplog.at_level(logging.WARNING):
+            adapter.send_text("!r", "first")
+            adapter.send_text("!r", "second")
+            with pytest.raises(MatrixSendQueueFull):
+                adapter.send_text("!r", "third")
+        assert "matrix_send_queue_overflow_drop" in caplog.text
+        loop.call_soon_threadsafe(blocker.set)
+        asyncio.run_coroutine_threadsafe(adapter.close(), loop).result(timeout=2)
 
 
 def test_is_ready_and_loop_property():
@@ -60,3 +160,6 @@ def test_is_ready_and_loop_property():
     next_loop = asyncio.new_event_loop()
     adapter.loop = next_loop
     assert adapter.loop is next_loop
+    loop.run_until_complete(adapter.close())
+    loop.close()
+    next_loop.close()

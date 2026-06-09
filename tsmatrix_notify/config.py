@@ -30,12 +30,22 @@ class TS3Config:
 
 
 @dataclass(frozen=True)
+class MatrixSendConfig:
+    queue_max_size: int
+    retry_max_attempts: int
+    retry_min_backoff_s: float
+    retry_max_backoff_s: float
+    retry_jitter_ratio: float
+
+
+@dataclass(frozen=True)
 class MatrixConfig:
     homeserver: str
     user_id: str
     access_token: str
     room_id: str
     session_file: str
+    send: MatrixSendConfig
 
 
 @dataclass(frozen=True)
@@ -76,6 +86,18 @@ def _require_int(name: str, value: str, *, minimum: int | None = None, maximum: 
         raise ConfigError(f"{name} must be <= {maximum}.")
     return parsed
 
+
+
+def _require_float(name: str, value: str, *, minimum: float | None = None, maximum: float | None = None) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{name} must be a number.") from exc
+    if minimum is not None and parsed < minimum:
+        raise ConfigError(f"{name} must be >= {minimum}.")
+    if maximum is not None and parsed > maximum:
+        raise ConfigError(f"{name} must be <= {maximum}.")
+    return parsed
 
 def _validate_matrix_homeserver(hs: str) -> str:
     parsed = urlparse(hs)
@@ -173,6 +195,12 @@ def load_config(log: logging.Logger, env: Mapping[str, str] | None = None) -> Ap
     if not (MATRIX_ROOM_ID_RE.match(matrix_room_id) or MATRIX_ROOM_ALIAS_RE.match(matrix_room_id)):
         raise ConfigError("MATRIX_ROOM_ID must look like !room:server or #alias:server.")
 
+    matrix_send_queue_max_size = _require_int("MATRIX_SEND_QUEUE_MAX_SIZE", env_map.get("MATRIX_SEND_QUEUE_MAX_SIZE", "100"), minimum=1)
+    matrix_send_retry_max_attempts = _require_int("MATRIX_SEND_RETRY_MAX_ATTEMPTS", env_map.get("MATRIX_SEND_RETRY_MAX_ATTEMPTS", "5"), minimum=1)
+    matrix_send_retry_min_backoff_s = _require_float("MATRIX_SEND_RETRY_MIN_BACKOFF_SECONDS", env_map.get("MATRIX_SEND_RETRY_MIN_BACKOFF_SECONDS", "1.0"), minimum=0.0)
+    matrix_send_retry_max_backoff_s = _require_float("MATRIX_SEND_RETRY_MAX_BACKOFF_SECONDS", env_map.get("MATRIX_SEND_RETRY_MAX_BACKOFF_SECONDS", "30.0"), minimum=0.0)
+    matrix_send_retry_jitter_ratio = _require_float("MATRIX_SEND_RETRY_JITTER_RATIO", env_map.get("MATRIX_SEND_RETRY_JITTER_RATIO", "0.25"), minimum=0.0, maximum=1.0)
+
     bot_messages_file = env_map.get("BOT_MESSAGES_FILE", "bot_messages.json")
     watchdog_timeout = _require_int("WATCHDOG_TIMEOUT", env_map.get("WATCHDOG_TIMEOUT", "1800"), minimum=1)
     health_host = (env_map.get("HEALTHCHECK_HOST", "0.0.0.0") or "0.0.0.0").strip()
@@ -181,7 +209,14 @@ def load_config(log: logging.Logger, env: Mapping[str, str] | None = None) -> Ap
     health_path_ready = _normalize_health_path(env_map.get("HEALTHCHECK_PATH_READY", "/healthz/ready"), "/healthz/ready")
 
     ts3 = TS3Config(host=ts3_host, port=ts3_port, user=ts3_user, password=ts3_password, vserver_id=ts3_vserver_id)
-    matrix = MatrixConfig(homeserver=matrix_homeserver, user_id=matrix_user_id, access_token=matrix_access_token, room_id=matrix_room_id, session_file=session_file)
+    matrix_send = MatrixSendConfig(
+        queue_max_size=matrix_send_queue_max_size,
+        retry_max_attempts=matrix_send_retry_max_attempts,
+        retry_min_backoff_s=matrix_send_retry_min_backoff_s,
+        retry_max_backoff_s=matrix_send_retry_max_backoff_s,
+        retry_jitter_ratio=matrix_send_retry_jitter_ratio,
+    )
+    matrix = MatrixConfig(homeserver=matrix_homeserver, user_id=matrix_user_id, access_token=matrix_access_token, room_id=matrix_room_id, session_file=session_file, send=matrix_send)
     cfg = AppConfig(
         ts3=ts3,
         matrix=matrix,

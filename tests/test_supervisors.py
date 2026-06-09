@@ -7,6 +7,7 @@ from tsmatrix_notify.application.supervisors import (
     MatrixReconnectSupervisor,
     SyncWatchdogState,
     TS3ReconnectSupervisor,
+    SyncValidationFailureTracker,
     make_ts3_thread_excepthook,
 )
 
@@ -97,3 +98,47 @@ def test_sync_watchdog_stall_context():
     context = state.stall_context(100.0)
     assert context["restart_reason"] == "matrix_sync_stalled"
     assert context["seconds_since_last_sync"] == 60.0
+
+
+def test_sync_validation_failure_deduplicates_within_window(caplog):
+    now = {"t": 100.0}
+    tracker = SyncValidationFailureTracker(logging.getLogger("test"), dedupe_window_s=60, reconnect_threshold=99, clock=lambda: now["t"])
+    exc = RuntimeError("Error validating response: 'next_batch' is a required property access_token=secret")
+
+    with caplog.at_level(logging.WARNING):
+        assert tracker.record(exc) is False
+        assert tracker.record(exc) is False
+
+    records = [r for r in caplog.records if r.message == "matrix_sync_validation_failure"]
+    assert len(records) == 1
+    assert "secret" not in getattr(records[0], "matrix_body_summary")
+    assert tracker.suppressed_count == 1
+
+
+def test_repeated_sync_validation_failure_requests_reconnect():
+    tracker = SyncValidationFailureTracker(logging.getLogger("test"), reconnect_threshold=2)
+    exc = RuntimeError("Error validating response: 'next_batch' is a required property")
+
+    assert tracker.is_missing_next_batch(exc) is True
+    assert tracker.record(exc) is False
+    assert tracker.record(exc) is True
+
+
+def test_ts3_recv_bad_file_descriptor_suppressed_during_close(caplog):
+    event = threading.Event()
+    called = {"base": False}
+
+    def base_hook(_args):
+        called["base"] = True
+
+    hook = make_ts3_thread_excepthook(event, logging.getLogger("test"), base_hook=base_hook)
+    thread = threading.Thread(name="Thread-1 (_recv)")
+    exc = OSError(9, "Bad file descriptor")
+    args = threading.ExceptHookArgs((type(exc), exc, None, thread))
+
+    with caplog.at_level(logging.DEBUG):
+        hook(args)
+
+    assert event.is_set() is False
+    assert called["base"] is False
+    assert "Bad file descriptor" in caplog.text
